@@ -1,0 +1,10 @@
+# Optional agent engines (python main.py --engine browser-use ...).
+#
+# Do not install this file with plain `pip install -r`: browser-use pins
+# google-genai==1.65.0 and google-auth==2.48.0, which conflict with this repo
+# (google-genai>=2.34). Use the installer, which applies uv overrides:
+#
+#   ./scripts/install_engines.sh
+#
+# Requires Python >= 3.11.
+browser-use==0.13.14
