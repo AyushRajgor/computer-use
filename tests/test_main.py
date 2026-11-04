@@ -161,6 +161,17 @@ class TestMain:
             assert main.main(["--query", "q", "--env", "browserbase"]) == 2
         assert "BROWSERBASE_API_KEY" in capsys.readouterr().err
 
+    def test_sigterm_is_handled_like_ctrl_c(self):
+        import signal
+
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            main._install_sigterm_handler()
+            with pytest.raises(KeyboardInterrupt):
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
     def test_unknown_env(self):
         with pytest.raises(SystemExit):
             main.main(["--query", "q", "--env", "mars"])

@@ -206,6 +206,9 @@ docker compose exec desktop python main.py --env desktop --query "..."
   to `127.0.0.1` only.
 * `DESKTOP_STARTUP_APPS="xterm,chromium"` opens apps on the desktop at start
   (the `desktop` service opens a terminal by default).
+* Host ports: `LIVE_VIEW_PORT` (default 6080) and `DESKTOP_LIVE_VIEW_PORT` (6081).
+* `docker stop` / Ctrl+C release Browserbase sessions and stop Browser Use
+  browsers before the container exits.
 * Include the optional browser-use engine: `WITH_BROWSER_USE=true docker compose build`.
 * Different base image / registry mirror (e.g. Docker Hub rate limits):
   `docker build --build-arg BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm .`

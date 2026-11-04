@@ -81,11 +81,23 @@ class CDPComputer(PlaywrightComputer):
                 self._page.set_viewport_size(viewport)
             except Exception as e:  # noqa: BLE001 - some providers lock the viewport
                 termcolor.cprint(f"Could not set viewport ({e}); using the browser's.", color="yellow")
+        self._control_key = self._detect_control_key()
         termcolor.cprint(
             f"Connected to browser over CDP ({self._describe_endpoint()}).",
             color="green",
             attrs=["bold"],
         )
+
+    def _detect_control_key(self) -> str:
+        """'Meta' if the remote browser runs on macOS, else 'Control'."""
+        try:
+            platform = self._page.evaluate(
+                "() => (navigator.userAgentData && navigator.userAgentData.platform)"
+                " || navigator.platform || ''"
+            )
+        except Exception:  # noqa: BLE001
+            return "Control"
+        return "Meta" if "mac" in str(platform).lower() else "Control"
 
     def _describe_endpoint(self) -> str:
         # Never print query strings: they often carry API keys.

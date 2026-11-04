@@ -42,6 +42,13 @@ class TestDomainPolicy:
         assert p.is_allowed("https://notexample.com")
         assert p.is_allowed("about:blank")
 
+    def test_non_http_schemes(self):
+        active = DomainPolicy(allowed=["example.com"])
+        assert not active.is_allowed("file:///etc/passwd")
+        assert not active.is_allowed("chrome://settings")
+        assert active.is_allowed("about:blank") and active.is_allowed("data:text/html,x")
+        assert DomainPolicy().is_allowed("file:///tmp/x")  # no policy: anything goes
+
     def test_allowlist(self):
         p = DomainPolicy(allowed=["*.google.com", "wikipedia.org"])
         assert p.is_allowed("https://www.google.com")
@@ -233,6 +240,37 @@ def test_playwright_actions(browser):
     c._domain_policy = DomainPolicy(blocked=["127.0.0.1"])
     with pytest.raises(PermissionError):
         c.navigate(base + "/two")
+
+
+@pytest.mark.integration
+def test_domain_policy_with_new_tab_and_redirect(fake_gemini):
+    fake_gemini.pages["/"] = TEST_PAGE
+    fake_gemini.pages["/two"] = b"<html><body>two</body></html>"
+    port = fake_gemini.url.rsplit(":", 1)[1]
+    computer = PlaywrightComputer(
+        screen_size=(1000, 700),
+        initial_url=fake_gemini.url + "/",
+        headless=True,
+        executable_path=CHROMIUM,
+        settle_time_s=0.1,
+        allowed_domains=["127.0.0.1"],
+    )
+    try:
+        computer.__enter__()
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f"Chromium not available: {e}")
+    try:
+        # target=_blank link with an active route: must not crash the action.
+        state = computer.click_at(150, 315)
+        assert state.url == fake_gemini.url + "/two"
+        # A redirect from an allowed host to a disallowed one is caught after load.
+        computer._page.evaluate(f"location.href = 'http://localhost:{port}/two'")
+        state = computer.current_state()
+        assert "Blocked" in computer._page.content()
+        with pytest.raises(PermissionError):
+            computer.navigate("file:///etc/hostname")
+    finally:
+        computer.__exit__(None, None, None)
 
 
 @pytest.mark.integration

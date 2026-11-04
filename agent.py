@@ -464,13 +464,20 @@ class ComputerUseAgent:
         extra: dict[str, Any] = {}
         safety = call.args.get("safety_decision")
         if isinstance(safety, dict):
+            # Asked outside the spinner so the prompt stays readable.
             if self._get_safety_confirmation(safety) == "TERMINATE":
                 raise _TerminateLoop("terminated", "Action was not confirmed.")
             if str(safety.get("decision", "")).lower() == "require_confirmation":
                 extra["safety_acknowledgement"] = True
 
         try:
-            outcome = self.handle_action(call)
+            if call.name in self._custom_functions:
+                # Custom functions may prompt the user (yield_to_user): no spinner.
+                outcome = self.handle_action(call)
+            else:
+                outcome = self._with_status(
+                    f"Executing {call.name}...", lambda: self.handle_action(call)
+                )
         except _TerminateLoop:
             raise
         except Exception as e:  # noqa: BLE001 - report the failure to the model
@@ -579,6 +586,10 @@ class ComputerUseAgent:
                 "Empty/malformed response, retrying...", self._backend.retry
             )
         self._accumulate_usage(turn)
+        if turn.retryable_empty:
+            turn.error = turn.error or (
+                f"The model returned {empty_retries + 1} empty or malformed responses in a row."
+            )
         return turn
 
     def run(self) -> AgentResult:
@@ -609,13 +620,7 @@ class ComputerUseAgent:
                         "max_steps", f"Stopped after {self._max_steps} steps (--max_steps)."
                     )
                 self._display(turn)
-                results = []
-                for call in turn.calls:
-                    results.append(
-                        self._with_status(
-                            f"Executing {call.name}...", lambda c=call: self._execute(c)
-                        )
-                    )
+                results = [self._execute(call) for call in turn.calls]
                 self._log(turn, results)
                 turn = self._next_turn(lambda: self._backend.send_results(results))
         except _TerminateLoop as t:

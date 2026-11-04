@@ -106,6 +106,14 @@ DEFAULT_LAUNCH_ARGS = (
 
 TabMode = Literal["single", "follow"]
 
+SAFE_SCHEMES = ("about", "data", "blob", "chrome-error")
+
+BLOCKED_PAGE = (
+    "<html><body style='font-family:sans-serif;padding:40px'>"
+    "<h1>Blocked</h1><p>Navigation to <b>{host}</b> is not allowed by this "
+    "agent's domain policy.</p></body></html>"
+)
+
 
 def _env_bool(name: str) -> Optional[bool]:
     value = os.environ.get(name)
@@ -134,7 +142,9 @@ class DomainPolicy:
     def is_allowed(self, url: str) -> bool:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
-            return True  # about:blank, data:, chrome:// error pages ...
+            # about:blank, data:, blob: and error pages are harmless; anything
+            # else (file:, chrome:, view-source:, ...) is blocked by an active policy.
+            return parsed.scheme in SAFE_SCHEMES or not self.active
         host = parsed.hostname or ""
         if any(_domain_matches(host, d) for d in self.blocked):
             return False
@@ -186,25 +196,32 @@ class PlaywrightComputer(Computer):
         self._page_stack: list = []
         self._pending_pages: list = []
         self._last_screenshot_size: Optional[tuple[int, int]] = None
+        # Playwright resolves "ControlOrMeta" from the *client* OS. That is right
+        # for a local browser; remote browsers set this from their own platform.
+        self._control_key = "ControlOrMeta"
 
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
 
     def _resolve_headless(self) -> bool:
-        if self._headless is not None:
-            return self._headless
-        env = _env_bool("PLAYWRIGHT_HEADLESS")
-        if env is not None:
-            return env
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        headless = self._headless
+        if headless is None:
+            headless = _env_bool("PLAYWRIGHT_HEADLESS")
+        no_display = (
+            sys.platform.startswith("linux")
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY")
+        )
+        if not headless and no_display:
+            # A headed browser cannot start without a display (SSH, WSL, CI ...).
             termcolor.cprint(
-                "No DISPLAY found; running the browser headless. Set "
-                "PLAYWRIGHT_HEADLESS=false and provide a display to watch it.",
+                "No DISPLAY found; running the browser headless. Provide a display "
+                "(or use the Docker image) to watch it.",
                 color="yellow",
             )
             return True
-        return False
+        return bool(headless)
 
     def _connect(self) -> None:
         """Launches a local browser and sets _browser/_context/_page."""
@@ -331,23 +348,44 @@ class PlaywrightComputer(Computer):
             pass
 
     def _route_request(self, route, request) -> None:
-        if (
-            request.is_navigation_request()
-            and request.frame.parent_frame is None
-            and not self._domain_policy.is_allowed(request.url)
-        ):
-            host = urlparse(request.url).hostname
-            route.fulfill(
-                status=403,
-                content_type="text/html",
-                body=(
-                    "<html><body style='font-family:sans-serif;padding:40px'>"
-                    f"<h1>Blocked</h1><p>Navigation to <b>{host}</b> is not "
-                    "allowed by this agent's domain policy.</p></body></html>"
-                ),
-            )
+        # Never let an exception escape: an unanswered route hangs the page.
+        try:
+            is_main_frame = True
+            try:
+                is_main_frame = request.frame.parent_frame is None
+            except Exception:  # noqa: BLE001 - e.g. a popup's first navigation has no frame yet
+                pass
+            if (
+                request.is_navigation_request()
+                and is_main_frame
+                and not self._domain_policy.is_allowed(request.url)
+            ):
+                route.fulfill(
+                    status=403,
+                    content_type="text/html",
+                    body=BLOCKED_PAGE.format(host=urlparse(request.url).hostname or request.url),
+                )
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            route.fallback()
+        except Exception:  # noqa: BLE001 - page already closed
+            pass
+
+    def _enforce_domain_policy(self) -> None:
+        """Re-checks the current URL: routes do not see redirect targets."""
+        if not self._domain_policy.active or self._page.is_closed():
             return
-        route.fallback()
+        url = self._page.url
+        if self._domain_policy.is_allowed(url):
+            return
+        termcolor.cprint(f"Blocked by domain policy: {url}", color="yellow")
+        try:
+            self._page.goto("about:blank")
+            self._page.set_content(BLOCKED_PAGE.format(host=urlparse(url).hostname or url))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _goto(self, url: str) -> None:
         try:
@@ -362,6 +400,7 @@ class PlaywrightComputer(Computer):
             self._page.wait_for_load_state(timeout=self._action_timeout_ms)
         except playwright.sync_api.TimeoutError:
             pass  # Long-polling pages never reach 'load'; use what we have.
+        self._enforce_domain_policy()
 
     # ------------------------------------------------------------------
     # actions
@@ -430,7 +469,7 @@ class PlaywrightComputer(Computer):
             self.highlight_mouse(x, y)
             self._page.mouse.click(x, y)
         if clear_before_typing:
-            self._page.keyboard.press("ControlOrMeta+A")
+            self._page.keyboard.press(f"{self._control_key}+A")
             self._page.keyboard.press("Delete")
         self._page.keyboard.type(text)
         if press_enter:
@@ -498,17 +537,18 @@ class PlaywrightComputer(Computer):
         if not normalized_url.startswith(("http://", "https://", "about:", "data:", "file:")):
             normalized_url = "https://" + normalized_url
         if not self._domain_policy.is_allowed(normalized_url):
+            target = urlparse(normalized_url).hostname or normalized_url
             raise PermissionError(
-                f"Navigation to {urlparse(normalized_url).hostname} is blocked by the "
-                "domain policy (--allowed_domains / --blocked_domains)."
+                f"Navigation to {target} is blocked by the domain policy "
+                "(--allowed_domains / --blocked_domains)."
             )
         self._goto(normalized_url)
         self._wait_for_load()
         return self.current_state()
 
-    @staticmethod
-    def _normalize_key(key: str) -> str:
-        return PLAYWRIGHT_KEY_MAP.get(key.lower(), key)
+    def _normalize_key(self, key: str) -> str:
+        mapped = PLAYWRIGHT_KEY_MAP.get(key.lower(), key)
+        return self._control_key if mapped == "ControlOrMeta" else mapped
 
     def key_combination(self, keys: list[str]) -> EnvState:
         keys = [self._normalize_key(k) for k in keys]

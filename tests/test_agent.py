@@ -384,6 +384,12 @@ class TestLoop:
         assert backend.retries == 1
         assert result.final_text == "recovered"
 
+    def test_exhausted_empty_retries_is_an_error(self):
+        turns = [ModelTurn(retryable_empty=True) for _ in range(5)]
+        agent, backend, result = run_with(turns)
+        assert result.status == "error" and not result.ok
+        assert "empty or malformed" in result.error
+
     def test_exceptions_become_error_result(self):
         agent = make_agent()
 

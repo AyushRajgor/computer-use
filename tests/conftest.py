@@ -133,3 +133,13 @@ def _isolate_env(monkeypatch):
         ):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+
+@pytest.fixture(autouse=True)
+def _restore_sigterm():
+    """main.main() installs a SIGTERM handler; keep pytest's own afterwards."""
+    import signal
+
+    previous = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, previous)

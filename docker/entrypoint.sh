@@ -85,12 +85,21 @@ case "$1" in
     exec sleep infinity
     ;;
   -*)
-    status=0
-    python main.py "$@" || status=$?
-    if is_true "${KEEP_DISPLAY_OPEN:-false}" && ! is_true "${HEADLESS:-false}"; then
-      echo "Agent exited with status ${status}. KEEP_DISPLAY_OPEN=true: the live view stays up (Ctrl+C to stop)."
-      sleep infinity
+    if ! is_true "${KEEP_DISPLAY_OPEN:-false}" || is_true "${HEADLESS:-false}"; then
+      # exec: python receives SIGTERM directly (docker stop) and can release
+      # cloud browser sessions before the container exits.
+      exec python main.py "$@"
     fi
+    # Keep the live view up afterwards: run python as a child, forward signals.
+    python main.py "$@" <&0 &
+    pid=$!
+    trap 'kill -TERM "${pid}" 2>/dev/null; wait "${pid}"; exit 143' TERM INT
+    status=0
+    wait "${pid}" || status=$?
+    trap 'exit 0' TERM INT
+    echo "Agent exited with status ${status}. KEEP_DISPLAY_OPEN=true: the live view stays up (Ctrl+C to stop)."
+    sleep infinity &
+    wait $!
     exit "${status}"
     ;;
   *)

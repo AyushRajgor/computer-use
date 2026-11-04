@@ -5,19 +5,22 @@
 #   docker compose run --rm --service-ports agent --env browserbase --query "..."
 #   docker compose run --rm --service-ports agent --env desktop --query "Open the terminal and run uname -a"
 #
-# Long-running desktop you can watch and send tasks to:
-#   docker compose up -d desktop
+# Long-running desktop you can watch and send tasks to (live view at http://localhost:6081):
+#   docker compose --profile desktop up -d desktop
 #   docker compose exec desktop python main.py --env desktop --query "..."
 #
 # Secrets come from .env (copy .env.example). Ports are bound to localhost only.
+# Change the host ports with LIVE_VIEW_PORT / DESKTOP_LIVE_VIEW_PORT.
 
 x-computer-use: &computer-use
   image: gemini-computer-use:latest
+  build:
+    context: .
+    args:
+      WITH_BROWSER_USE: ${WITH_BROWSER_USE:-false}
   env_file:
     - path: .env
       required: false
-  environment:
-    SAFETY_CONFIRMATION: ${SAFETY_CONFIRMATION:-ask}
   shm_size: "2gb"
   stdin_open: true
   tty: true
@@ -27,20 +30,23 @@ x-computer-use: &computer-use
 services:
   agent:
     <<: *computer-use
-    build:
-      context: .
-      args:
-        WITH_BROWSER_USE: ${WITH_BROWSER_USE:-false}
+    environment:
+      # The container always serves noVNC on 6080; only the host port changes.
+      NOVNC_PORT: "6080"
+      LIVE_VIEW_URL: http://localhost:${LIVE_VIEW_PORT:-6080}/vnc.html?autoconnect=1&resize=scale
+      SAFETY_CONFIRMATION: ${SAFETY_CONFIRMATION:-ask}
     ports:
-      - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
+      - "127.0.0.1:${LIVE_VIEW_PORT:-6080}:6080"
 
   desktop:
     <<: *computer-use
     command: ["serve"]
     environment:
+      NOVNC_PORT: "6080"
+      LIVE_VIEW_URL: http://localhost:${DESKTOP_LIVE_VIEW_PORT:-6081}/vnc.html?autoconnect=1&resize=scale
       COMPUTER_USE_ENV: desktop
       DESKTOP_STARTUP_APPS: ${DESKTOP_STARTUP_APPS:-xterm}
       SAFETY_CONFIRMATION: ${SAFETY_CONFIRMATION:-ask}
     ports:
-      - "127.0.0.1:${DESKTOP_NOVNC_PORT:-6081}:6080"
+      - "127.0.0.1:${DESKTOP_LIVE_VIEW_PORT:-6081}:6080"
     profiles: ["desktop"]

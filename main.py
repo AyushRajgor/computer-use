@@ -20,6 +20,7 @@ same command works locally, in Docker and in CI.
 """
 import argparse
 import os
+import signal
 import sys
 from typing import Optional
 
@@ -341,7 +342,21 @@ def run_browser_use_engine(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _install_sigterm_handler() -> None:
+    """Treat SIGTERM (docker stop, CI cancel, timeout) like Ctrl+C so cloud
+    browser sessions are released / stopped instead of left running (billed)."""
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt()
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except ValueError:  # not the main thread
+        pass
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    _install_sigterm_handler()
     args = build_parser().parse_args(argv)
     args.env = ENV_ALIASES.get(args.env, args.env)
     if args.env not in ENVIRONMENTS:
@@ -350,6 +365,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.engine == "browser-use":
             return run_browser_use_engine(args)
         return run_gemini(args)
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
     except (ValueError, RuntimeError, PermissionError, FileNotFoundError) as e:
         # Setup problems (missing API key, no display, bad option, ...).
         print(f"Error: {e}", file=sys.stderr)
