@@ -204,6 +204,8 @@ docker compose exec desktop python main.py --env desktop --query "..."
 * `VNC_PASSWORD` protects the live view; `VNC_VIEW_ONLY=true` makes it read-only;
   `KEEP_DISPLAY_OPEN=true` keeps it up after the agent finishes. Ports are bound
   to `127.0.0.1` only.
+* `DESKTOP_STARTUP_APPS="xterm,chromium"` opens apps on the desktop at start
+  (the `desktop` service opens a terminal by default).
 * Include the optional browser-use engine: `WITH_BROWSER_USE=true docker compose build`.
 * Different base image / registry mirror (e.g. Docker Hub rate limits):
   `docker build --build-arg BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm .`
