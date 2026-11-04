@@ -11,575 +11,660 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""The Gemini Computer Use agent loop.
+
+    1. Send the task (+ a screenshot) with the `computer_use` tool enabled.
+    2. Receive function calls (UI actions with an `intent`, maybe a
+       `safety_decision`).
+    3. Execute them on a `Computer` (browser or desktop).
+    4. Send back a `function_result` per call (JSON + new screenshot).
+    5. Repeat until the model answers without function calls.
+
+See https://aistudio.google.com/docs/computer-use
+"""
+import dataclasses
+import datetime
+import json
 import os
-from typing import Literal, Optional, Union, Any
-from google import genai
-from google.genai import types
-import termcolor
-from google.genai.types import (
-    Part,
-    GenerateContentConfig,
-    Content,
-    Candidate,
-    FunctionResponse,
-    FinishReason,
-)
+import pathlib
+import sys
 import time
+from typing import Any, Callable, Literal, Optional, Sequence, Union
+
+import termcolor
+from google import genai
 from rich.console import Console
 from rich.table import Table
 
-from computers import EnvState, Computer
-
-MAX_RECENT_TURN_WITH_SCREENSHOTS = 3
-LEGACY_COMPUTER_USE_MODELS = [
-    "gemini-2.5-computer-use-preview-10-2025",
-    "gemini-3-flash-preview",
-    "gemini-3.1-pro-preview",
-]
-
-# Legacy predefined functions, which are used in gemini-2.5-computer-use-preview-10-2025, gemini-3-flash-preview and gemini-3.1-pro-preview.
-LEGACY_PREDEFINED_COMPUTER_USE_FUNCTIONS = [
-    "open_web_browser",
-    "click_at",
-    "hover_at",
-    "type_text_at",
-    "scroll_document",
-    "scroll_at",
-    "wait_5_seconds",
-    "go_back",
-    "go_forward",
-    "search",
-    "navigate",
-    "key_combination",
-    "drag_and_drop",
-]
-
-# Predefined functions which are used in gemini-3.5-flash and future models.
-PREDEFINED_COMPUTER_USE_FUNCTIONS = [
-    "click",
-    "double_click",
-    "triple_click",
-    "middle_click",
-    "right_click",
-    "mouse_down",
-    "mouse_up",
-    "move",
-    "type",
-    "drag_and_drop",
-    "wait",
-    "press_key",
-    "key_down",
-    "key_up",
-    "hotkey",
-    "take_screenshot",
-    "scroll",
-    "go_back",
-    "navigate",
-    "go_forward",
-]
-
+from backends import (
+    BackendConfig,
+    GenerateContentBackend,
+    InteractionsBackend,
+    ModelBackend,
+    ModelTurn,
+    ToolCall,
+    ToolResult,
+)
+from computers import Computer, EnvState
+from computers.computer import UnsupportedActionError
+from custom_functions import CustomFunction
+from models import (
+    ALL_PREDEFINED_FUNCTIONS,
+    DEFAULT_MODEL,
+    SAFETY_POLICIES,
+    THINKING_LEVELS,
+    get_model_info,
+)
 
 console = Console()
 
-# Built-in Computer Use tools will return "EnvState".
-# Custom provided functions will return "dict".
+ApiName = Literal["interactions", "generate_content"]
+SafetyMode = Literal["ask", "auto-confirm", "deny"]
+AgentStatus = Literal["completed", "max_steps", "terminated", "error"]
+
+# Built-in Computer Use actions return "EnvState"; custom functions return "dict".
 FunctionResponseT = Union[EnvState, dict]
 
+MAX_WAIT_SECONDS = 60
+MAX_EMPTY_RETRIES = 3
 
-def multiply_numbers(x: float, y: float) -> dict:
-    """Multiplies two numbers."""
-    return {"result": x * y}
+# Kept for backwards compatibility with earlier versions of this repository.
+MAX_RECENT_TURN_WITH_SCREENSHOTS = 3
 
 
-class BrowserAgent:
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def create_client() -> genai.Client:
+    """Creates a GenAI client for the Gemini Developer API or the Gemini
+    Enterprise Agent Platform (formerly Vertex AI).
+
+    Developer API: set GEMINI_API_KEY (or GOOGLE_API_KEY).
+    Agent Platform: set USE_VERTEXAI=true (or GOOGLE_GENAI_USE_ENTERPRISE=true)
+    plus VERTEXAI_PROJECT / VERTEXAI_LOCATION (or GOOGLE_CLOUD_PROJECT /
+    GOOGLE_CLOUD_LOCATION). The Interactions API on Agent Platform currently
+    only supports the `global` location.
+    """
+    use_enterprise = (
+        _env_flag("USE_VERTEXAI")
+        or _env_flag("GOOGLE_GENAI_USE_ENTERPRISE")
+        or _env_flag("GOOGLE_GENAI_USE_VERTEXAI")
+    )
+    if use_enterprise:
+        return genai.Client(
+            enterprise=True,
+            project=os.environ.get("VERTEXAI_PROJECT")
+            or os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            location=os.environ.get("VERTEXAI_LOCATION")
+            or os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or "global",
+        )
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    return genai.Client(api_key=api_key)
+
+
+@dataclasses.dataclass
+class AgentResult:
+    status: AgentStatus
+    final_text: Optional[str]
+    steps: int
+    usage: dict[str, int]
+    log_dir: Optional[str] = None
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "completed"
+
+
+class _TerminateLoop(Exception):
+    def __init__(self, status: AgentStatus, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class ComputerUseAgent:
+    """Runs a Gemini Computer Use agent against a `Computer`."""
+
     def __init__(
         self,
         browser_computer: Computer,
         query: str,
-        model_name: str,
+        model_name: str = DEFAULT_MODEL,
         verbose: bool = True,
+        *,
+        api: ApiName = "interactions",
+        history: Literal["server", "client"] = "server",
+        environment: Optional[str] = None,
+        thinking_level: Optional[str] = None,
+        media_resolution: Optional[str] = None,
+        enable_prompt_injection_detection: Optional[bool] = None,
+        disabled_safety_policies: Sequence[str] = (),
+        excluded_predefined_functions: Sequence[str] = (),
+        custom_functions: Sequence[CustomFunction] = (),
+        system_instruction: Optional[str] = None,
+        safety_mode: SafetyMode = "ask",
+        max_steps: int = 100,
+        max_recent_screenshots: int = MAX_RECENT_TURN_WITH_SCREENSHOTS,
+        send_initial_screenshot: bool = True,
+        log_dir: Optional[str] = None,
+        client: Optional[genai.Client] = None,
+        input_fn: Callable[[str], str] = input,
     ):
         self._browser_computer = browser_computer
         self._query = query
         self._model_name = model_name
         self._verbose = verbose
-        self.final_reasoning = None
-        self._client = genai.Client(
-            api_key=os.environ.get("GEMINI_API_KEY"),
-            vertexai=os.environ.get("USE_VERTEXAI", "0").lower() in ["true", "1"],
-            project=os.environ.get("VERTEXAI_PROJECT"),
-            location=os.environ.get("VERTEXAI_LOCATION"),
+        self._api = api
+        self._safety_mode = safety_mode
+        self._max_steps = max_steps
+        self._send_initial_screenshot = send_initial_screenshot
+        self._input_fn = input_fn
+        self._custom_functions = {f.name: f for f in custom_functions}
+        self._environment = environment or getattr(
+            browser_computer, "environment", "browser"
         )
-        self._contents: list[Content] = [
-            Content(
-                role="user",
-                parts=[
-                    Part(text=self._query),
-                ],
+        self.final_reasoning: Optional[str] = None
+        self.usage: dict[str, int] = {}
+        self._step = 0
+
+        self._check_model(model_name)
+        if thinking_level:
+            self._check_thinking_level(model_name, thinking_level)
+        for policy in disabled_safety_policies:
+            if policy.lower() not in SAFETY_POLICIES:
+                raise ValueError(
+                    f"Unknown safety policy '{policy}'. Valid: {', '.join(SAFETY_POLICIES)}"
+                )
+        if enable_prompt_injection_detection is None:
+            info = get_model_info(model_name)
+            enable_prompt_injection_detection = (
+                info.supports_prompt_injection_detection if info else None
             )
-        ]
-        self._use_legacy_computer_use_function_call = (
-            model_name in LEGACY_COMPUTER_USE_MODELS
+
+        self._client = client or create_client()
+        self._backend_config = BackendConfig(
+            model=model_name,
+            environment=self._environment,
+            excluded_predefined_functions=tuple(excluded_predefined_functions),
+            disabled_safety_policies=tuple(disabled_safety_policies),
+            enable_prompt_injection_detection=enable_prompt_injection_detection,
+            custom_functions=tuple(custom_functions),
+            system_instruction=system_instruction,
+            thinking_level=thinking_level,
+            media_resolution=media_resolution,
+            max_recent_screenshots=max_recent_screenshots,
         )
+        self._backend = self._make_backend(history)
 
-        # Exclude any predefined functions here.
-        excluded_predefined_functions = []
+        self._log_dir: Optional[pathlib.Path] = None
+        if log_dir:
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            self._log_dir = pathlib.Path(log_dir) / stamp
+            self._log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Add your own custom functions here.
-        custom_functions = [
-            # For example:
-            types.FunctionDeclaration.from_callable(
-                client=self._client, callable=multiply_numbers
+    # ------------------------------------------------------------------
+    # setup helpers
+    # ------------------------------------------------------------------
+
+    def _make_backend(self, history: str) -> ModelBackend:
+        on_retry = lambda attempt, delay, exc: termcolor.cprint(  # noqa: E731
+            f"Model request failed on attempt {attempt} ({exc}). Retrying in {delay:.0f}s...",
+            color="yellow",
+        )
+        if self._api == "interactions":
+            return InteractionsBackend(
+                self._client, self._backend_config, on_retry=on_retry, history=history
             )
-        ]
+        if self._api == "generate_content":
+            return GenerateContentBackend(
+                self._client, self._backend_config, on_retry=on_retry
+            )
+        raise ValueError(f"Unknown api: {self._api}")
 
-        self._generate_content_config = GenerateContentConfig(
-            temperature=1,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=8192,
-            tools=[
-                types.Tool(
-                    computer_use=types.ComputerUse(
-                        environment=types.Environment.ENVIRONMENT_BROWSER,
-                        excluded_predefined_functions=excluded_predefined_functions,
-                    ),
-                ),
-                types.Tool(function_declarations=custom_functions),
-            ],
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
-        )
+    @staticmethod
+    def _check_model(model_name: str) -> None:
+        info = get_model_info(model_name)
+        if info is None:
+            return
+        if info.status == "shutdown":
+            termcolor.cprint(
+                f"Warning: {model_name} has been shut down ({info.description}). "
+                f"Use {info.replacement} instead.",
+                color="red",
+                attrs=["bold"],
+            )
+        elif info.status == "deprecated":
+            termcolor.cprint(
+                f"Warning: {model_name} is deprecated ({info.description}). "
+                f"Update to {info.replacement}.",
+                color="yellow",
+            )
+
+    @staticmethod
+    def _check_thinking_level(model_name: str, level: str) -> None:
+        if level not in THINKING_LEVELS:
+            raise ValueError(
+                f"Unknown thinking level '{level}'. Valid: {', '.join(THINKING_LEVELS)}"
+            )
+        info = get_model_info(model_name)
+        if info and info.thinking_levels and level not in info.thinking_levels:
+            raise ValueError(
+                f"{model_name} does not support thinking_level='{level}'. "
+                f"Supported: {', '.join(info.thinking_levels)}"
+            )
+
+    # ------------------------------------------------------------------
+    # coordinates
+    # ------------------------------------------------------------------
+
+    def denormalize_x(self, x: Union[int, float]) -> int:
+        width = self._browser_computer.screen_size()[0]
+        return max(0, min(width - 1, int(float(x) / 1000 * width)))
+
+    def denormalize_y(self, y: Union[int, float]) -> int:
+        height = self._browser_computer.screen_size()[1]
+        return max(0, min(height - 1, int(float(y) / 1000 * height)))
+
+    def _xy(self, args: dict[str, Any], x_key: str = "x", y_key: str = "y") -> dict:
+        return {"x": self.denormalize_x(args[x_key]), "y": self.denormalize_y(args[y_key])}
+
+    # ------------------------------------------------------------------
+    # action dispatch
+    # ------------------------------------------------------------------
 
     def handle_action(
-        self, action: types.FunctionCall, use_legacy_actions: bool
+        self, action: Any, use_legacy_actions: Optional[bool] = None
     ) -> FunctionResponseT:
-        """Handles the action and returns the environment state."""
-        if use_legacy_actions:
-            return self.handle_legacy_action(action)
+        """Executes one function call and returns the resulting state.
 
-        if action.name == "open_web_browser":
-            return self._browser_computer.open_web_browser()
-        elif action.name == "click":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "double_click":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.double_click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "triple_click":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.triple_click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "middle_click":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.middle_click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "right_click":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.right_click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "mouse_down":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.mouse_down(
-                x=x,
-                y=y,
-            )
-        elif action.name == "mouse_up":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.mouse_up(
-                x=x,
-                y=y,
-            )
-        elif action.name == "move":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.hover_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "type":
-            press_enter = action.args.get("press_enter", False)
-            return self._browser_computer.type_text(
-                text=action.args["text"],
-                press_enter=press_enter,
-            )
-        elif action.name == "scroll":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            magnitude = action.args.get("magnitude", 800)
-            direction = action.args["direction"]
+        `action` can be a `ToolCall` or a `google.genai.types.FunctionCall`.
+        Both the current (Gemini 3.x / 4) and the legacy action names are
+        supported; `use_legacy_actions` is accepted for backwards compatibility
+        and ignored.
+        """
+        name = action.name
+        args = dict(getattr(action, "args", None) or {})
+        c = self._browser_computer
 
-            if direction in ("up", "down"):
-                magnitude = self.denormalize_y(magnitude)
-            elif direction in ("left", "right"):
-                magnitude = self.denormalize_x(magnitude)
+        if name in self._custom_functions:
+            return self._custom_functions[name](args)
+
+        # --- clicks / mouse ------------------------------------------------
+        if name in ("click", "click_at"):
+            return c.click_at(**self._xy(args))
+        if name == "double_click":
+            return c.double_click_at(**self._xy(args))
+        if name == "triple_click":
+            return c.triple_click_at(**self._xy(args))
+        if name == "middle_click":
+            return c.middle_click_at(**self._xy(args))
+        if name == "right_click":
+            return c.right_click_at(**self._xy(args))
+        if name == "mouse_down":
+            return c.mouse_down(**self._xy(args))
+        if name == "mouse_up":
+            return c.mouse_up(**self._xy(args))
+        if name in ("move", "hover_at"):
+            return c.hover_at(**self._xy(args))
+        if name == "drag_and_drop":
+            if "start_x" in args:  # current schema
+                start = self._xy(args, "start_x", "start_y")
+                end = self._xy(args, "end_x", "end_y")
+            else:  # legacy schema
+                start = self._xy(args)
+                end = self._xy(args, "destination_x", "destination_y")
+            return c.drag_and_drop(
+                x=start["x"],
+                y=start["y"],
+                destination_x=end["x"],
+                destination_y=end["y"],
+            )
+
+        # --- keyboard ------------------------------------------------------
+        if name == "type":
+            kwargs: dict[str, Any] = {
+                "text": args["text"],
+                "press_enter": bool(args.get("press_enter", False)),
+            }
+            if "x" in args and "y" in args:
+                kwargs.update(self._xy(args))
+            if "clear_before_typing" in args:
+                kwargs["clear_before_typing"] = bool(args["clear_before_typing"])
+            return c.type_text(**kwargs)
+        if name == "type_text_at":
+            return c.type_text_at(
+                **self._xy(args),
+                text=args["text"],
+                press_enter=bool(args.get("press_enter", False)),
+                clear_before_typing=bool(args.get("clear_before_typing", True)),
+            )
+        if name == "press_key":
+            return c.press_key(args["key"])
+        if name in ("hotkey", "key_combination"):
+            keys = args["keys"]
+            if isinstance(keys, str):
+                keys = [k for k in keys.split("+") if k]
+            return c.key_combination(list(keys))
+        if name == "key_down":
+            return c.key_down(args["key"])
+        if name == "key_up":
+            return c.key_up(args["key"])
+
+        # --- scrolling -----------------------------------------------------
+        if name in ("scroll", "scroll_at"):
+            direction = args["direction"]
+            if direction not in ("up", "down", "left", "right"):
+                raise ValueError(f"Unknown scroll direction: {direction}")
+            if "magnitude_in_pixels" in args:
+                magnitude = int(args["magnitude_in_pixels"])
+            elif "magnitude" in args:  # legacy: normalized 0-999
+                raw = args["magnitude"]
+                magnitude = (
+                    self.denormalize_y(raw)
+                    if direction in ("up", "down")
+                    else self.denormalize_x(raw)
+                )
+            elif name == "scroll":
+                magnitude = 300
             else:
-                raise ValueError("Unknown direction: ", direction)
-            return self._browser_computer.scroll_at(
-                x=x, y=y, direction=direction, magnitude=magnitude
-            )
-        elif action.name == "wait":
-            wait_seconds = int(action.args.get("seconds", 1))
-            return self._browser_computer.wait(wait_seconds)
-        elif action.name == "go_back":
-            return self._browser_computer.go_back()
-        elif action.name == "go_forward":
-            return self._browser_computer.go_forward()
-        elif action.name == "navigate":
-            return self._browser_computer.navigate(action.args["url"])
-        elif action.name == "hotkey":
-            return self._browser_computer.key_combination(action.args["keys"])
-        elif action.name == "press_key":
-            return self._browser_computer.press_key(action.args["key"])
-        elif action.name == "key_down":
-            return self._browser_computer.key_down(action.args["key"])
-        elif action.name == "key_up":
-            return self._browser_computer.key_up(action.args["key"])
-        elif action.name == "take_screenshot":
-            return self._browser_computer.take_screenshot()
-        elif action.name == "drag_and_drop":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            destination_x = self.denormalize_x(action.args["destination_x"])
-            destination_y = self.denormalize_y(action.args["destination_y"])
-            return self._browser_computer.drag_and_drop(
-                x=x,
-                y=y,
-                destination_x=destination_x,
-                destination_y=destination_y,
-            )
-        # Handle the custom function declarations here.
-        elif action.name == multiply_numbers.__name__:
-            return multiply_numbers(x=action.args["x"], y=action.args["y"])
-        else:
-            raise ValueError(f"Unsupported function: {action}")
-
-    def handle_legacy_action(self, action: types.FunctionCall) -> FunctionResponseT:
-        """Handles the action defined in the legacy models, and returns the environment state."""
-        if action.name == "open_web_browser":
-            return self._browser_computer.open_web_browser()
-        elif action.name == "click_at":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.click_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "hover_at":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            return self._browser_computer.hover_at(
-                x=x,
-                y=y,
-            )
-        elif action.name == "type_text_at":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            press_enter = action.args.get("press_enter", False)
-            clear_before_typing = action.args.get("clear_before_typing", True)
-            return self._browser_computer.type_text_at(
-                x=x,
-                y=y,
-                text=action.args["text"],
-                press_enter=press_enter,
-                clear_before_typing=clear_before_typing,
-            )
-        elif action.name == "scroll_document":
-            return self._browser_computer.scroll_document(action.args["direction"])
-        elif action.name == "scroll_at":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            magnitude = action.args.get("magnitude", 800)
-            direction = action.args["direction"]
-
-            if direction in ("up", "down"):
-                magnitude = self.denormalize_y(magnitude)
-            elif direction in ("left", "right"):
-                magnitude = self.denormalize_x(magnitude)
-            else:
-                raise ValueError("Unknown direction: ", direction)
-            return self._browser_computer.scroll_at(
-                x=x, y=y, direction=direction, magnitude=magnitude
-            )
-        elif action.name == "wait_5_seconds":
-            return self._browser_computer.wait_5_seconds()
-
-        elif action.name == "go_back":
-            return self._browser_computer.go_back()
-        elif action.name == "go_forward":
-            return self._browser_computer.go_forward()
-        elif action.name == "search":
-            return self._browser_computer.search()
-        elif action.name == "navigate":
-            return self._browser_computer.navigate(action.args["url"])
-        elif action.name == "key_combination":
-            return self._browser_computer.key_combination(
-                action.args["keys"].split("+")
-            )
-        elif action.name == "drag_and_drop":
-            x = self.denormalize_x(action.args["x"])
-            y = self.denormalize_y(action.args["y"])
-            destination_x = self.denormalize_x(action.args["destination_x"])
-            destination_y = self.denormalize_y(action.args["destination_y"])
-            return self._browser_computer.drag_and_drop(
-                x=x,
-                y=y,
-                destination_x=destination_x,
-                destination_y=destination_y,
-            )
-        # Handle the custom function declarations here.
-        elif action.name == multiply_numbers.__name__:
-            return multiply_numbers(x=action.args["x"], y=action.args["y"])
-        else:
-            raise ValueError(f"Unsupported function: {action}")
-
-    def get_model_response(
-        self, max_retries=5, base_delay_s=1
-    ) -> types.GenerateContentResponse:
-        for attempt in range(max_retries):
-            try:
-                response = self._client.models.generate_content(
-                    model=self._model_name,
-                    contents=self._contents,
-                    config=self._generate_content_config,
+                magnitude = (
+                    self.denormalize_y(800)
+                    if direction in ("up", "down")
+                    else self.denormalize_x(800)
                 )
-                return response  # Return response on success
-            except Exception as e:
-                print(e)
-                if attempt < max_retries - 1:
-                    delay = base_delay_s * (2**attempt)
-                    message = (
-                        f"Generating content failed on attempt {attempt + 1}. "
-                        f"Retrying in {delay} seconds...\n"
-                    )
-                    termcolor.cprint(
-                        message,
-                        color="yellow",
-                    )
-                    time.sleep(delay)
-                else:
-                    termcolor.cprint(
-                        f"Generating content failed after {max_retries} attempts.\n",
-                        color="red",
-                    )
-                    raise
+            return c.scroll_at(**self._xy(args), direction=direction, magnitude=magnitude)
+        if name == "scroll_document":
+            return c.scroll_document(args["direction"])
 
-    def get_text(self, candidate: Candidate) -> Optional[str]:
-        """Extracts the text from the candidate."""
-        if not candidate.content or not candidate.content.parts:
-            return None
-        text = []
-        for part in candidate.content.parts:
-            if part.text:
-                text.append(part.text)
-        return " ".join(text) or None
+        # --- misc ----------------------------------------------------------
+        if name == "wait":
+            seconds = min(float(args.get("seconds", 1)), MAX_WAIT_SECONDS)
+            return c.wait(seconds)
+        if name == "wait_5_seconds":
+            return c.wait_5_seconds()
+        if name == "take_screenshot":
+            return c.take_screenshot()
+        if name == "open_web_browser":
+            return c.open_web_browser()
 
-    def extract_function_calls(self, candidate: Candidate) -> list[types.FunctionCall]:
-        """Extracts the function call from the candidate."""
-        if not candidate.content or not candidate.content.parts:
-            return []
-        ret = []
-        for part in candidate.content.parts:
-            if part.function_call:
-                ret.append(part.function_call)
-        return ret
+        # --- browser navigation -------------------------------------------
+        if name == "navigate":
+            return c.navigate(args["url"])
+        if name == "go_back":
+            return c.go_back()
+        if name == "go_forward":
+            return c.go_forward()
+        if name == "search":
+            return c.search()
 
-    def run_one_iteration(self) -> Literal["COMPLETE", "CONTINUE"]:
-        # Generate a response from the model.
-        if self._verbose:
-            with console.status(
-                "Generating response from Gemini Computer Use...", spinner_style=None
-            ):
-                try:
-                    response = self.get_model_response()
-                except Exception as e:
-                    return "COMPLETE"
-        else:
-            try:
-                response = self.get_model_response()
-            except Exception as e:
-                return "COMPLETE"
-
-        if not response.candidates:
-            if (
-                response.prompt_feedback
-                and response.prompt_feedback.block_reason == types.BlockReason.SAFETY
-            ):
-                raise ValueError(
-                    f"Response was blocked due to safety. Feedback: {response.prompt_feedback}"
-                )
-            print("Response has no candidates!")
-            print(response)
-            raise ValueError("Empty response")
-
-        # Extract the text and function call from the response.
-        candidate = response.candidates[0]
-        # Append the model turn to conversation history.
-        if candidate.content:
-            self._contents.append(candidate.content)
-
-        reasoning = self.get_text(candidate)
-        function_calls = self.extract_function_calls(candidate)
-
-        # Retry the request in case of malformed FCs.
-        if (
-            not function_calls
-            and not reasoning
-            and candidate.finish_reason == FinishReason.MALFORMED_FUNCTION_CALL
-        ):
-            return "CONTINUE"
-
-        if not function_calls:
-            print(f"Agent Loop Complete: {reasoning}")
-            self.final_reasoning = reasoning
-            return "COMPLETE"
-
-        function_call_strs = []
-        for function_call in function_calls:
-            # Print the function call and any reasoning.
-            function_call_str = f"Name: {function_call.name}"
-            if function_call.args:
-                function_call_str += f"\nArgs:"
-                for key, value in function_call.args.items():
-                    function_call_str += f"\n  {key}: {value}"
-            function_call_strs.append(function_call_str)
-
-        table = Table(expand=True)
-        table.add_column(
-            "Gemini Computer Use Reasoning", header_style="magenta", ratio=1
-        )
-        table.add_column("Function Call(s)", header_style="cyan", ratio=1)
-        table.add_row(reasoning, "\n".join(function_call_strs))
-        if self._verbose:
-            console.print(table)
-            print()
-
-        function_responses = []
-        for function_call in function_calls:
-            extra_fr_fields = {}
-            if function_call.args and (
-                safety := function_call.args.get("safety_decision")
-            ):
-                decision = self._get_safety_confirmation(safety)
-                if decision == "TERMINATE":
-                    print("Terminating agent loop")
-                    return "COMPLETE"
-                # Explicitly mark the safety check as acknowledged.
-                extra_fr_fields["safety_acknowledgement"] = "true"
-            if self._verbose:
-                with console.status(
-                    "Sending command to Computer...", spinner_style=None
-                ):
-                    fc_result = self.handle_action(
-                        function_call, self._use_legacy_computer_use_function_call
-                    )
-            else:
-                fc_result = self.handle_action(
-                    function_call, self._use_legacy_computer_use_function_call
-                )
-            if isinstance(fc_result, EnvState):
-                function_responses.append(
-                    FunctionResponse(
-                        name=function_call.name,
-                        response={
-                            "url": fc_result.url,
-                            **extra_fr_fields,
-                        },
-                        parts=[
-                            types.FunctionResponsePart(
-                                inline_data=types.FunctionResponseBlob(
-                                    mime_type="image/png", data=fc_result.screenshot
-                                )
-                            )
-                        ],
-                    )
-                )
-            elif isinstance(fc_result, dict):
-                function_responses.append(
-                    FunctionResponse(name=function_call.name, response=fc_result)
-                )
-
-        self._contents.append(
-            Content(
-                role="user",
-                parts=[Part(function_response=fr) for fr in function_responses],
+        if name in ALL_PREDEFINED_FUNCTIONS:
+            raise UnsupportedActionError(
+                f"'{name}' is not supported by the {self._environment} environment."
             )
-        )
+        raise ValueError(f"Unsupported function: {name}")
 
-        # only keep screenshots in the few most recent turns, remove the screenshot images from the old turns.
-        turn_with_screenshots_found = 0
-        for content in reversed(self._contents):
-            if content.role == "user" and content.parts:
-                # check if content has screenshot of the predefined computer use functions.
-                has_screenshot = False
-                for part in content.parts:
-                    if (
-                        part.function_response
-                        and part.function_response.parts
-                        and part.function_response.name
-                        in (PREDEFINED_COMPUTER_USE_FUNCTIONS + LEGACY_PREDEFINED_COMPUTER_USE_FUNCTIONS)
-                    ):
-                        has_screenshot = True
-                        break
-
-                if has_screenshot:
-                    turn_with_screenshots_found += 1
-                    # remove the screenshot image if the number of screenshots exceed the limit.
-                    if turn_with_screenshots_found > MAX_RECENT_TURN_WITH_SCREENSHOTS:
-                        for part in content.parts:
-                            if (
-                                part.function_response
-                                and part.function_response.parts
-                                and part.function_response.name
-                                in (PREDEFINED_COMPUTER_USE_FUNCTIONS + LEGACY_PREDEFINED_COMPUTER_USE_FUNCTIONS)
-                            ):
-                                part.function_response.parts = None
-
-        return "CONTINUE"
+    # ------------------------------------------------------------------
+    # safety
+    # ------------------------------------------------------------------
 
     def _get_safety_confirmation(
         self, safety: dict[str, Any]
     ) -> Literal["CONTINUE", "TERMINATE"]:
-        if safety["decision"] != "require_confirmation":
-            raise ValueError(f"Unknown safety decision: safety['decision']")
+        decision = str(safety.get("decision", "")).lower()
+        explanation = safety.get("explanation", "")
+        if decision in ("block", "blocked", "deny", "denied", "prohibited"):
+            termcolor.cprint(
+                f"Action blocked by the safety service: {explanation}",
+                color="red",
+                attrs=["bold"],
+            )
+            return "TERMINATE"
+        if decision != "require_confirmation":
+            # Allowed / regular decisions need no confirmation.
+            return "CONTINUE"
+
         termcolor.cprint(
             "Safety service requires explicit confirmation!",
             color="yellow",
             attrs=["bold"],
         )
-        print(safety["explanation"])
-        decision = ""
-        while decision.lower() not in ("y", "n", "ye", "yes", "no"):
-            decision = input("Do you wish to proceed? [Yes]/[No]\n")
-        if decision.lower() in ("n", "no"):
+        print(explanation)
+        if self._safety_mode == "auto-confirm":
+            termcolor.cprint("Auto-confirming (--safety auto-confirm).", color="yellow")
+            return "CONTINUE"
+        if self._safety_mode == "deny":
+            termcolor.cprint("Denied (--safety deny).", color="red")
             return "TERMINATE"
-        return "CONTINUE"
+        if not sys.stdin or not sys.stdin.isatty():
+            termcolor.cprint(
+                "No interactive terminal available to confirm; denying. "
+                "Use --safety auto-confirm to approve automatically.",
+                color="red",
+            )
+            return "TERMINATE"
+        decision_input = ""
+        while decision_input.lower() not in ("y", "n", "ye", "yes", "no"):
+            try:
+                decision_input = self._input_fn("Do you wish to proceed? [Yes]/[No]\n")
+            except EOFError:
+                return "TERMINATE"
+        return "TERMINATE" if decision_input.lower() in ("n", "no") else "CONTINUE"
 
-    def agent_loop(self):
-        status = "CONTINUE"
-        while status == "CONTINUE":
-            status = self.run_one_iteration()
+    # ------------------------------------------------------------------
+    # the loop
+    # ------------------------------------------------------------------
 
-    def denormalize_x(self, x: int) -> int:
-        return int(x / 1000 * self._browser_computer.screen_size()[0])
+    def _execute(self, call: ToolCall) -> ToolResult:
+        extra: dict[str, Any] = {}
+        safety = call.args.get("safety_decision")
+        if isinstance(safety, dict):
+            if self._get_safety_confirmation(safety) == "TERMINATE":
+                raise _TerminateLoop("terminated", "Action was not confirmed.")
+            if str(safety.get("decision", "")).lower() == "require_confirmation":
+                extra["safety_acknowledgement"] = True
 
-    def denormalize_y(self, y: int) -> int:
-        return int(y / 1000 * self._browser_computer.screen_size()[1])
+        try:
+            outcome = self.handle_action(call)
+        except _TerminateLoop:
+            raise
+        except Exception as e:  # noqa: BLE001 - report the failure to the model
+            termcolor.cprint(f"Action {call.name} failed: {e}", color="red")
+            screenshot = None
+            payload: dict[str, Any] = {"error": str(e), **extra}
+            try:
+                state = self._browser_computer.current_state()
+                screenshot = state.screenshot
+                if state.url:
+                    payload["url"] = state.url
+            except Exception:  # noqa: BLE001
+                pass
+            return ToolResult(call=call, payload=payload, screenshot=screenshot, is_error=True)
+
+        if isinstance(outcome, EnvState):
+            payload = dict(outcome.metadata)
+            if outcome.url is not None:
+                payload["url"] = outcome.url
+            payload.update(extra)
+            return ToolResult(call=call, payload=payload, screenshot=outcome.screenshot)
+
+        payload = dict(outcome)
+        payload.update(extra)
+        screenshot = None
+        fn = self._custom_functions.get(call.name)
+        if fn is not None and fn.returns_screenshot:
+            state = self._browser_computer.current_state()
+            screenshot = state.screenshot
+            if state.url:
+                payload.setdefault("url", state.url)
+        return ToolResult(call=call, payload=payload, screenshot=screenshot)
+
+    def _display(self, turn: ModelTurn) -> None:
+        if not self._verbose:
+            return
+        if turn.thoughts:
+            console.print(f"[dim]{turn.thoughts}[/dim]")
+        call_strs = []
+        intents = []
+        for call in turn.calls:
+            args = {
+                k: v for k, v in call.args.items() if k not in ("intent", "safety_decision")
+            }
+            s = f"[bold]{call.name}[/bold]"
+            if args:
+                s += "\n" + "\n".join(f"  {k}: {v}" for k, v in args.items())
+            call_strs.append(s)
+            if call.args.get("intent"):
+                intents.append(f"- {call.args['intent']}")
+        reasoning = "\n".join(filter(None, [turn.text, "\n".join(intents)]))
+        table = Table(expand=True, title=f"Step {self._step}")
+        table.add_column("Gemini Computer Use Reasoning", header_style="magenta", ratio=1)
+        table.add_column("Function Call(s)", header_style="cyan", ratio=1)
+        table.add_row(reasoning or "", "\n".join(call_strs))
+        console.print(table)
+
+    def _log(self, turn: ModelTurn, results: Sequence[ToolResult]) -> None:
+        if not self._log_dir:
+            return
+        record: dict[str, Any] = {
+            "step": self._step,
+            "time": time.time(),
+            "text": turn.text,
+            "thoughts": turn.thoughts,
+            "status": turn.status,
+            "calls": [
+                {"id": c.id, "name": c.name, "args": c.args} for c in turn.calls
+            ],
+            "results": [],
+            "usage": turn.usage,
+        }
+        for i, r in enumerate(results):
+            entry: dict[str, Any] = {
+                "call_id": r.call.id,
+                "name": r.call.name,
+                "payload": r.payload,
+                "is_error": r.is_error,
+            }
+            if r.screenshot:
+                png = self._log_dir / f"step_{self._step:03d}_{i}_{r.call.name}.png"
+                png.write_bytes(r.screenshot)
+                entry["screenshot"] = png.name
+            record["results"].append(entry)
+        with open(self._log_dir / "trajectory.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+
+    def _accumulate_usage(self, turn: ModelTurn) -> None:
+        # Each request reports its own usage; sum them up over the run.
+        for key, value in turn.usage.items():
+            self.usage[key] = self.usage.get(key, 0) + value
+
+    def _with_status(self, message: str, fn: Callable[[], Any]) -> Any:
+        if self._verbose:
+            with console.status(message, spinner_style=None):
+                return fn()
+        return fn()
+
+    def _next_turn(self, fn: Callable[[], ModelTurn]) -> ModelTurn:
+        turn = self._with_status("Generating response from Gemini Computer Use...", fn)
+        empty_retries = 0
+        while turn.retryable_empty and empty_retries < MAX_EMPTY_RETRIES:
+            empty_retries += 1
+            self._accumulate_usage(turn)
+            turn = self._with_status(
+                "Empty/malformed response, retrying...", self._backend.retry
+            )
+        self._accumulate_usage(turn)
+        return turn
+
+    def run(self) -> AgentResult:
+        """Runs the agent until completion and returns an `AgentResult`."""
+        live_url = self._browser_computer.live_view_url()
+        if live_url and self._verbose:
+            termcolor.cprint(f"Live view: {live_url}", color="green", attrs=["bold"])
+
+        status: AgentStatus = "completed"
+        error: Optional[str] = None
+        try:
+            screenshot = None
+            if self._send_initial_screenshot:
+                screenshot = self._browser_computer.current_state().screenshot
+            turn = self._next_turn(lambda: self._backend.start(self._query, screenshot))
+
+            while True:
+                self._step += 1
+                if turn.error and not turn.calls:
+                    raise _TerminateLoop("error", turn.error)
+                if not turn.calls:
+                    self.final_reasoning = turn.text
+                    self._display(turn)
+                    self._log(turn, [])
+                    break
+                if self._max_steps and self._step > self._max_steps:
+                    raise _TerminateLoop(
+                        "max_steps", f"Stopped after {self._max_steps} steps (--max_steps)."
+                    )
+                self._display(turn)
+                results = []
+                for call in turn.calls:
+                    results.append(
+                        self._with_status(
+                            f"Executing {call.name}...", lambda c=call: self._execute(c)
+                        )
+                    )
+                self._log(turn, results)
+                turn = self._next_turn(lambda: self._backend.send_results(results))
+        except _TerminateLoop as t:
+            status, error = t.status, t.message
+        except KeyboardInterrupt:
+            status, error = "terminated", "Interrupted by user."
+        except Exception as e:  # noqa: BLE001
+            status, error = "error", f"{type(e).__name__}: {e}"
+
+        result = AgentResult(
+            status=status,
+            final_text=self.final_reasoning,
+            steps=self._step,
+            usage=dict(self.usage),
+            log_dir=str(self._log_dir) if self._log_dir else None,
+            error=error,
+        )
+        if self._log_dir:
+            (self._log_dir / "result.json").write_text(
+                json.dumps(dataclasses.asdict(result), indent=2, default=str)
+            )
+        if self._verbose:
+            self._print_summary(result)
+        return result
+
+    def agent_loop(self) -> AgentResult:
+        """Backwards compatible alias of `run()`."""
+        return self.run()
+
+    @staticmethod
+    def _print_summary(result: AgentResult) -> None:
+        color = "green" if result.ok else "red"
+        termcolor.cprint(
+            f"\nAgent finished: {result.status} after {result.steps} step(s).",
+            color=color,
+            attrs=["bold"],
+        )
+        if result.final_text:
+            print(result.final_text)
+        if result.error:
+            termcolor.cprint(result.error, color=color)
+        if result.usage:
+            print(
+                "Tokens: "
+                + ", ".join(f"{k.replace('total_', '')}={v}" for k, v in result.usage.items())
+            )
+        if result.log_dir:
+            print(f"Run log: {result.log_dir}")
+
+
+# Backwards compatible name.
+BrowserAgent = ComputerUseAgent
