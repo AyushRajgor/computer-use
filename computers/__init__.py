@@ -11,13 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .computer import Computer, EnvState
-from .browserbase.browserbase import BrowserbaseComputer
+from .computer import Computer, EnvState, UnsupportedActionError
 from .playwright.playwright import PlaywrightComputer
+from .cdp.cdp import CDPComputer
+from .browserbase.browserbase import BrowserbaseComputer
+from .browser_use.browser_use import BrowserUseComputer
+from .desktop.desktop import DesktopComputer
 
 __all__ = [
     "Computer",
     "EnvState",
-    "BrowserbaseComputer",
+    "UnsupportedActionError",
     "PlaywrightComputer",
+    "CDPComputer",
+    "BrowserbaseComputer",
+    "BrowserUseComputer",
+    "DesktopComputer",
 ]

@@ -11,51 +11,68 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
-import termcolor
-import time
+"""A browser environment driven by Playwright.
+
+`PlaywrightComputer` launches a local Chromium/Chrome. The remote browser
+backends (`CDPComputer`, `BrowserbaseComputer`, `BrowserUseComputer`) subclass
+it and only override how the browser is obtained (`_connect`) and released
+(`_disconnect`); all actions are shared.
+"""
 import os
 import sys
-from ..computer import (
-    Computer,
-    EnvState,
-)
-import playwright.sync_api
-from playwright.sync_api import sync_playwright
-from typing import Literal
+import time
+from typing import Literal, Optional, Sequence
+from urllib.parse import urlparse
 
-# Define a mapping from the user-friendly key names to Playwright's expected key names.
-# Playwright is generally good with case-insensitivity for these, but it's best to be canonical.
-# See: https://playwright.dev/docs/api/class-keyboard#keyboard-press
-# Keys like 'a', 'b', '1', '$' are passed directly.
+import playwright.sync_api
+import termcolor
+from playwright.sync_api import sync_playwright
+
+from ..computer import Computer, EnvState
+
+# Map model / user-friendly key names to Playwright key names.
+# See https://playwright.dev/docs/api/class-keyboard#keyboard-press
+# Keys like 'a', 'b', '1', '$' are passed through unchanged.
 PLAYWRIGHT_KEY_MAP = {
     "backspace": "Backspace",
     "tab": "Tab",
-    "return": "Enter",  # Playwright uses 'Enter'
+    "return": "Enter",
     "enter": "Enter",
     "shift": "Shift",
     "control": "ControlOrMeta",
+    "ctrl": "ControlOrMeta",
     "alt": "Alt",
+    "option": "Alt",
     "escape": "Escape",
-    "space": "Space",  # Can also just be " "
+    "esc": "Escape",
+    "space": "Space",
+    "spacebar": "Space",
     "pageup": "PageUp",
+    "page_up": "PageUp",
     "pagedown": "PageDown",
+    "page_down": "PageDown",
     "end": "End",
     "home": "Home",
     "left": "ArrowLeft",
+    "arrowleft": "ArrowLeft",
     "up": "ArrowUp",
+    "arrowup": "ArrowUp",
     "right": "ArrowRight",
+    "arrowright": "ArrowRight",
     "down": "ArrowDown",
+    "arrowdown": "ArrowDown",
     "insert": "Insert",
     "delete": "Delete",
-    "semicolon": ";",  # For actual character ';'
-    "equals": "=",  # For actual character '='
-    "multiply": "Multiply",  # NumpadMultiply
-    "add": "Add",  # NumpadAdd
-    "separator": "Separator",  # Numpad specific
-    "subtract": "Subtract",  # NumpadSubtract, or just '-' for character
-    "decimal": "Decimal",  # NumpadDecimal, or just '.' for character
-    "divide": "Divide",  # NumpadDivide, or just '/' for character
+    "del": "Delete",
+    "semicolon": ";",
+    "equals": "=",
+    "multiply": "Multiply",
+    "add": "Add",
+    "separator": "Separator",
+    "subtract": "Subtract",
+    "decimal": "Decimal",
+    "divide": "Divide",
+    "capslock": "CapsLock",
     "f1": "F1",
     "f2": "F2",
     "f3": "F3",
@@ -68,84 +85,285 @@ PLAYWRIGHT_KEY_MAP = {
     "f10": "F10",
     "f11": "F11",
     "f12": "F12",
-    "command": "Meta",  # 'Meta' is Command on macOS, Windows key on Windows
+    "command": "Meta",
+    "cmd": "Meta",
+    "meta": "Meta",
+    "super": "Meta",
+    "win": "Meta",
+    "windows": "Meta",
 }
+
+DEFAULT_LAUNCH_ARGS = (
+    "--disable-extensions",
+    "--disable-file-system",
+    "--disable-plugins",
+    "--disable-dev-shm-usage",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+)
+
+TabMode = Literal["single", "follow"]
+
+
+def _env_bool(name: str) -> Optional[bool]:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _domain_matches(host: str, pattern: str) -> bool:
+    pattern = pattern.strip().lower().lstrip("*").lstrip(".")
+    host = host.lower()
+    return bool(pattern) and (host == pattern or host.endswith("." + pattern))
+
+
+class DomainPolicy:
+    """Allowlist / blocklist for top-level navigations."""
+
+    def __init__(self, allowed: Sequence[str] = (), blocked: Sequence[str] = ()):
+        self.allowed = [d for d in allowed if d.strip()]
+        self.blocked = [d for d in blocked if d.strip()]
+
+    @property
+    def active(self) -> bool:
+        return bool(self.allowed or self.blocked)
+
+    def is_allowed(self, url: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return True  # about:blank, data:, chrome:// error pages ...
+        host = parsed.hostname or ""
+        if any(_domain_matches(host, d) for d in self.blocked):
+            return False
+        if self.allowed:
+            return any(_domain_matches(host, d) for d in self.allowed)
+        return True
 
 
 class PlaywrightComputer(Computer):
-    """Connects to a local Playwright instance."""
+    """Launches and controls a local Chromium (or Chrome / Edge) browser."""
+
+    environment = "browser"
 
     def __init__(
         self,
-        screen_size: tuple[int, int],
+        screen_size: tuple[int, int] = (1440, 900),
         initial_url: str = "https://www.google.com",
         search_engine_url: str = "https://www.google.com",
         highlight_mouse: bool = False,
+        *,
+        headless: Optional[bool] = None,
+        browser_channel: Optional[str] = None,
+        executable_path: Optional[str] = None,
+        user_data_dir: Optional[str] = None,
+        proxy_server: Optional[str] = None,
+        allowed_domains: Sequence[str] = (),
+        blocked_domains: Sequence[str] = (),
+        tab_mode: TabMode = "single",
+        action_timeout_ms: int = 30_000,
+        settle_time_s: float = 0.5,
     ):
         self._initial_url = initial_url
         self._screen_size = screen_size
         self._search_engine_url = search_engine_url
         self._highlight_mouse = highlight_mouse
+        self._headless = headless
+        self._browser_channel = browser_channel or os.environ.get("PLAYWRIGHT_CHANNEL")
+        self._executable_path = executable_path
+        self._user_data_dir = user_data_dir
+        self._proxy_server = proxy_server
+        self._domain_policy = DomainPolicy(allowed_domains, blocked_domains)
+        self._tab_mode = tab_mode
+        self._action_timeout_ms = action_timeout_ms
+        self._settle_time_s = settle_time_s
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._page_stack: list = []
+        self._pending_pages: list = []
 
-    def _handle_new_page(self, new_page: playwright.sync_api.Page):
-        """The Computer Use model only supports a single tab at the moment.
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
 
-        Some websites, however, try to open links in a new tab.
-        For those situations, we intercept the page-opening behavior, and instead overwrite the current page.
-        """
-        new_url = new_page.url
-        new_page.close()
-        self._page.goto(new_url)
+    def _resolve_headless(self) -> bool:
+        if self._headless is not None:
+            return self._headless
+        env = _env_bool("PLAYWRIGHT_HEADLESS")
+        if env is not None:
+            return env
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            termcolor.cprint(
+                "No DISPLAY found; running the browser headless. Set "
+                "PLAYWRIGHT_HEADLESS=false and provide a display to watch it.",
+                color="yellow",
+            )
+            return True
+        return False
+
+    def _connect(self) -> None:
+        """Launches a local browser and sets _browser/_context/_page."""
+        headless = self._resolve_headless()
+        launch_kwargs = dict(
+            args=list(DEFAULT_LAUNCH_ARGS),
+            headless=headless,
+        )
+        if self._browser_channel and self._browser_channel != "chromium":
+            launch_kwargs["channel"] = self._browser_channel
+        if self._executable_path:
+            launch_kwargs["executable_path"] = self._executable_path
+        if self._proxy_server:
+            launch_kwargs["proxy"] = {"server": self._proxy_server}
+        viewport = {"width": self._screen_size[0], "height": self._screen_size[1]}
+
+        if self._user_data_dir:
+            # Persistent profile: cookies / logins survive between runs.
+            self._context = self._playwright.chromium.launch_persistent_context(
+                self._user_data_dir, viewport=viewport, **launch_kwargs
+            )
+            self._browser = None
+            self._page = (
+                self._context.pages[0] if self._context.pages else self._context.new_page()
+            )
+        else:
+            self._browser = self._playwright.chromium.launch(**launch_kwargs)
+            self._context = self._browser.new_context(viewport=viewport)
+            self._page = self._context.new_page()
+        termcolor.cprint(
+            f"Started local {'headless ' if headless else ''}browser"
+            f"{' (' + self._browser_channel + ')' if self._browser_channel else ''}.",
+            color="green",
+            attrs=["bold"],
+        )
+
+    def _disconnect(self) -> None:
+        """Closes what `_connect` opened."""
+        try:
+            if self._context:
+                self._context.close()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+        try:
+            if self._browser:
+                self._browser.close()
+        except Exception as e:  # noqa: BLE001
+            # Browser was already shut down because of SIGINT or such.
+            if "closed" not in str(e).lower():
+                raise
 
     def __enter__(self):
         print("Creating session...")
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            args=[
-                "--disable-extensions",
-                "--disable-file-system",
-                "--disable-plugins",
-                "--disable-dev-shm-usage",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                # No '--no-sandbox' arg means the sandbox is on.
-            ],
-            headless=bool(os.environ.get("PLAYWRIGHT_HEADLESS", False)),
-        )
-        self._context = self._browser.new_context(
-            viewport={
-                "width": self._screen_size[0],
-                "height": self._screen_size[1],
-            }
-        )
-        self._page = self._context.new_page()
-        self._page.goto(self._initial_url)
-
-        self._context.on("page", self._handle_new_page)
-
-        termcolor.cprint(
-            f"Started local playwright.",
-            color="green",
-            attrs=["bold"],
-        )
+        try:
+            self._connect()
+            self._configure()
+            if self._initial_url:
+                self._goto(self._initial_url)
+        except BaseException:
+            self.__exit__(*sys.exc_info())
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._context:
-            self._context.close()
         try:
-            self._browser.close()
-        except Exception as e:
-            # Browser was already shut down because of SIGINT or such.
-            if "Browser.close: Connection closed while reading from the driver" in str(
-                e
-            ):
-                pass
-            else:
-                raise
+            self._disconnect()
+        finally:
+            if self._playwright:
+                self._playwright.stop()
+                self._playwright = None
 
-        self._playwright.stop()
+    def _configure(self) -> None:
+        """Common setup once a context/page exists."""
+        self._context.set_default_timeout(self._action_timeout_ms)
+        self._context.on("page", self._handle_new_page)
+        if self._domain_policy.active:
+            self._context.route("**/*", self._route_request)
+
+    # ------------------------------------------------------------------
+    # tabs & navigation policy
+    # ------------------------------------------------------------------
+
+    def _handle_new_page(self, new_page: playwright.sync_api.Page):
+        # Event handlers must not block; the page is processed after the action.
+        self._pending_pages.append(new_page)
+
+    def _process_new_pages(self) -> None:
+        """Computer Use works with a single visible tab.
+
+        `single` (default): links that open a new tab are loaded in the current
+        tab instead. `follow`: the agent switches to the new tab (keeps popups
+        such as OAuth logins working) and returns to the previous tab when the
+        new one closes.
+        """
+        while self._pending_pages:
+            new_page = self._pending_pages.pop(0)
+            if new_page.is_closed():
+                continue
+            if self._tab_mode == "follow":
+                self._page_stack.append(self._page)
+                self._page = new_page
+                continue
+            new_url = new_page.url
+            if not new_url or new_url == "about:blank":
+                try:
+                    new_page.wait_for_url(lambda u: u != "about:blank", timeout=5_000)
+                    new_url = new_page.url
+                except Exception:  # noqa: BLE001 - the popup never navigated
+                    pass
+            new_page.close()
+            if new_url and new_url != "about:blank":
+                self._goto(new_url)
+        if self._tab_mode == "follow" and self._page.is_closed():
+            while self._page_stack:
+                previous = self._page_stack.pop()
+                if not previous.is_closed():
+                    self._page = previous
+                    break
+        try:
+            # Background tabs produce no frames, so screenshots would hang.
+            self._page.bring_to_front()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _route_request(self, route, request) -> None:
+        if (
+            request.is_navigation_request()
+            and request.frame.parent_frame is None
+            and not self._domain_policy.is_allowed(request.url)
+        ):
+            host = urlparse(request.url).hostname
+            route.fulfill(
+                status=403,
+                content_type="text/html",
+                body=(
+                    "<html><body style='font-family:sans-serif;padding:40px'>"
+                    f"<h1>Blocked</h1><p>Navigation to <b>{host}</b> is not "
+                    "allowed by this agent's domain policy.</p></body></html>"
+                ),
+            )
+            return
+        route.fallback()
+
+    def _goto(self, url: str) -> None:
+        try:
+            self._page.goto(url, wait_until="domcontentloaded")
+        except playwright.sync_api.TimeoutError:
+            termcolor.cprint(f"Timed out loading {url}; continuing.", color="yellow")
+
+    def _wait_for_load(self) -> None:
+        if self._pending_pages or (self._page_stack and self._page.is_closed()):
+            self._process_new_pages()
+        try:
+            self._page.wait_for_load_state(timeout=self._action_timeout_ms)
+        except playwright.sync_api.TimeoutError:
+            pass  # Long-polling pages never reach 'load'; use what we have.
+
+    # ------------------------------------------------------------------
+    # actions
+    # ------------------------------------------------------------------
 
     def open_web_browser(self) -> EnvState:
         return self.current_state()
@@ -153,120 +371,91 @@ class PlaywrightComputer(Computer):
     def click_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.click(x, y)
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def double_click_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.dblclick(x, y)
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def triple_click_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.click(x, y, click_count=3)
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def middle_click_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.click(x, y, button="middle")
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def right_click_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.click(x, y, button="right")
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def mouse_down(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.move(x, y)
         self._page.mouse.down()
-        self._page.wait_for_load_state()
         return self.current_state()
-    
+
     def mouse_up(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.move(x, y)
         self._page.mouse.up()
-        self._page.wait_for_load_state()
-        return self.current_state() 
-    
-    def type_text(self, text: str, press_enter: bool = False) -> EnvState:
-        self._page.keyboard.type(text)
-        self._page.wait_for_load_state()
-
-        if press_enter:
-            self.key_combination(["Enter"])
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
-    def wait(self, seconds: int = 1) -> EnvState:
-        self._page.wait_for_timeout(seconds * 1000)
-        return self.current_state()
-        
 
     def hover_at(self, x: int, y: int) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.move(x, y)
-        self._page.wait_for_load_state()
         return self.current_state()
 
-    def type_text_at(
+    def type_text(
         self,
-        x: int,
-        y: int,
         text: str,
         press_enter: bool = False,
-        clear_before_typing: bool = True,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        clear_before_typing: bool = False,
     ) -> EnvState:
-        self.highlight_mouse(x, y)
-        self._page.mouse.click(x, y)
-        self._page.wait_for_load_state()
-
+        if x is not None and y is not None:
+            self.highlight_mouse(x, y)
+            self._page.mouse.click(x, y)
         if clear_before_typing:
-            if sys.platform == "darwin":
-                self.key_combination(["Command", "A"])
-            else:
-                self.key_combination(["Control", "A"])
-            self.key_combination(["Delete"])
-
+            self._page.keyboard.press("ControlOrMeta+A")
+            self._page.keyboard.press("Delete")
         self._page.keyboard.type(text)
-        self._page.wait_for_load_state()
-
         if press_enter:
-            self.key_combination(["Enter"])
-        self._page.wait_for_load_state()
+            self._page.keyboard.press("Enter")
+        self._wait_for_load()
         return self.current_state()
 
-    def _horizontal_document_scroll(
-        self, direction: Literal["left", "right"]
-    ) -> EnvState:
+    def wait(self, seconds: float = 1) -> EnvState:
+        self._page.wait_for_timeout(float(seconds) * 1000)
+        return self.current_state()
+
+    def _horizontal_document_scroll(self, direction: Literal["left", "right"]) -> EnvState:
         # Scroll by 50% of the viewport size.
-        horizontal_scroll_amount = self.screen_size()[0] // 2
-        if direction == "left":
-            sign = "-"
-        else:
-            sign = ""
-        scroll_argument = f"{sign}{horizontal_scroll_amount}"
-        # Scroll using JS.
-        self._page.evaluate(f"window.scrollBy({scroll_argument}, 0); ")
-        self._page.wait_for_load_state()
+        amount = self.screen_size()[0] // 2
+        sign = "-" if direction == "left" else ""
+        self._page.evaluate(f"window.scrollBy({sign}{amount}, 0);")
+        self._wait_for_load()
         return self.current_state()
 
-    def scroll_document(
-        self, direction: Literal["up", "down", "left", "right"]
-    ) -> EnvState:
+    def scroll_document(self, direction: Literal["up", "down", "left", "right"]) -> EnvState:
         if direction == "down":
             return self.key_combination(["PageDown"])
-        elif direction == "up":
+        if direction == "up":
             return self.key_combination(["PageUp"])
-        elif direction in ("left", "right"):
+        if direction in ("left", "right"):
             return self._horizontal_document_scroll(direction)
-        else:
-            raise ValueError("Unsupported direction: ", direction)
+        raise ValueError("Unsupported direction: ", direction)
 
     def scroll_at(
         self,
@@ -276,82 +465,73 @@ class PlaywrightComputer(Computer):
         magnitude: int = 800,
     ) -> EnvState:
         self.highlight_mouse(x, y)
-
         self._page.mouse.move(x, y)
-        self._page.wait_for_load_state()
-
-        dx = 0
-        dy = 0
-        if direction == "up":
-            dy = -magnitude
-        elif direction == "down":
-            dy = magnitude
-        elif direction == "left":
-            dx = -magnitude
-        elif direction == "right":
-            dx = magnitude
-        else:
+        dx, dy = {
+            "up": (0, -magnitude),
+            "down": (0, magnitude),
+            "left": (-magnitude, 0),
+            "right": (magnitude, 0),
+        }.get(direction, (None, None))
+        if dx is None:
             raise ValueError("Unsupported direction: ", direction)
-
         self._page.mouse.wheel(dx, dy)
-        self._page.wait_for_load_state()
-        return self.current_state()
-
-    def wait_5_seconds(self) -> EnvState:
-        time.sleep(5)
+        self._wait_for_load()
         return self.current_state()
 
     def go_back(self) -> EnvState:
         self._page.go_back()
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
 
     def go_forward(self) -> EnvState:
         self._page.go_forward()
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
 
     def search(self) -> EnvState:
         return self.navigate(self._search_engine_url)
 
     def navigate(self, url: str) -> EnvState:
-        normalized_url = url
-        if not normalized_url.startswith(("http://", "https://")):
+        normalized_url = url.strip()
+        if not normalized_url.startswith(("http://", "https://", "about:", "data:", "file:")):
             normalized_url = "https://" + normalized_url
-        self._page.goto(normalized_url)
-        self._page.wait_for_load_state()
+        if not self._domain_policy.is_allowed(normalized_url):
+            raise PermissionError(
+                f"Navigation to {urlparse(normalized_url).hostname} is blocked by the "
+                "domain policy (--allowed_domains / --blocked_domains)."
+            )
+        self._goto(normalized_url)
+        self._wait_for_load()
         return self.current_state()
+
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        return PLAYWRIGHT_KEY_MAP.get(key.lower(), key)
 
     def key_combination(self, keys: list[str]) -> EnvState:
-        # Normalize all keys to the Playwright compatible version.
-        keys = [PLAYWRIGHT_KEY_MAP.get(k.lower(), k) for k in keys]
-
+        keys = [self._normalize_key(k) for k in keys]
+        if not keys:
+            raise ValueError("key_combination requires at least one key")
         for key in keys[:-1]:
             self._page.keyboard.down(key)
-
         self._page.keyboard.press(keys[-1])
-
         for key in reversed(keys[:-1]):
             self._page.keyboard.up(key)
-
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         return self.current_state()
-    
+
     def press_key(self, key: str) -> EnvState:
         return self.key_combination([key])
-    
+
     def key_down(self, key: str) -> EnvState:
-        key = PLAYWRIGHT_KEY_MAP.get(key.lower(), key)
-        self._page.keyboard.down(key)
-        self._page.wait_for_load_state()
+        self._page.keyboard.down(self._normalize_key(key))
         return self.current_state()
-        
+
     def key_up(self, key: str) -> EnvState:
-        key = PLAYWRIGHT_KEY_MAP.get(key.lower(), key)
-        self._page.keyboard.up(key)
-        self._page.wait_for_load_state()
+        self._page.keyboard.up(self._normalize_key(key))
+        self._wait_for_load()
         return self.current_state()
-    
+
     def take_screenshot(self) -> EnvState:
         return self.current_state()
 
@@ -360,31 +540,46 @@ class PlaywrightComputer(Computer):
     ) -> EnvState:
         self.highlight_mouse(x, y)
         self._page.mouse.move(x, y)
-        self._page.wait_for_load_state()
         self._page.mouse.down()
-        self._page.wait_for_load_state()
-
         self.highlight_mouse(destination_x, destination_y)
-        self._page.mouse.move(destination_x, destination_y)
-        self._page.wait_for_load_state()
+        self._page.mouse.move(destination_x, destination_y, steps=10)
         self._page.mouse.up()
+        self._wait_for_load()
         return self.current_state()
 
     def current_state(self) -> EnvState:
-        self._page.wait_for_load_state()
+        self._wait_for_load()
         # Even if Playwright reports the page as loaded, it may not be so.
-        # Add a manual sleep to make sure the page has finished rendering.
-        time.sleep(0.5)
-        screenshot_bytes = self._page.screenshot(type="png", full_page=False)
+        # Wait a moment for rendering. wait_for_timeout (unlike time.sleep) also
+        # dispatches Playwright events, e.g. a new tab opened by the last click.
+        if self._page.is_closed():
+            self._process_new_pages()
+        self._page.wait_for_timeout(self._settle_time_s * 1000)
+        if self._pending_pages or self._page.is_closed():
+            self._process_new_pages()
+            self._wait_for_load()
+        # scale="css" keeps the screenshot in CSS pixels, i.e. the same
+        # coordinate space as mouse events, also on HiDPI / remote browsers.
+        screenshot_bytes = self._page.screenshot(type="png", full_page=False, scale="css")
         return EnvState(screenshot=screenshot_bytes, url=self._page.url)
 
     def screen_size(self) -> tuple[int, int]:
-        viewport_size = self._page.viewport_size
-        # If available, try to take the local playwright viewport size.
+        viewport_size = self._page.viewport_size if self._page else None
         if viewport_size:
             return viewport_size["width"], viewport_size["height"]
-        # If unavailable, fall back to the original provided size.
+        if self._page:
+            # Remote browsers without viewport emulation: ask the page.
+            try:
+                width, height = self._page.evaluate("() => [innerWidth, innerHeight]")
+                if width and height:
+                    return int(width), int(height)
+            except Exception:  # noqa: BLE001
+                pass
         return self._screen_size
+
+    def live_view_url(self) -> Optional[str]:
+        # Set by the Docker image (noVNC) when the browser runs on a virtual display.
+        return os.environ.get("LIVE_VIEW_URL") or None
 
     def highlight_mouse(self, x: int, y: int):
         if not self._highlight_mouse:
