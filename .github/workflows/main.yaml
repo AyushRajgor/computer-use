@@ -27,7 +27,8 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.x"]
+        # google-genai >= 2.34 requires Python 3.11+.
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
     - name: Check out repository
@@ -43,7 +44,25 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Install Chromium and desktop test tools
+      run: |
+        python -m playwright install --with-deps chromium
+        sudo apt-get install -y --no-install-recommends xvfb xdotool xterm
+
     - name: Run pytest
       run: |
         pytest
 
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v6
+
+    - name: Build image
+      run: docker build -t gemini-computer-use:ci .
+
+    - name: Smoke test
+      run: |
+        docker run --rm -e HEADLESS=true gemini-computer-use:ci --help
+        docker run --rm gemini-computer-use:ci python -c "import agent, main, computers; print('ok')"
