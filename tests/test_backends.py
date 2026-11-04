@@ -133,6 +133,16 @@ class TestInteractionsClientHistory:
         assert types_ == ["user_input", "thought", "function_call", "function_result"]
         assert second["input"][1]["signature"] == "c2ln"  # thought signatures are preserved
 
+    def test_retry_drops_empty_output(self, fake_gemini):
+        fake_gemini.responses = [
+            interaction(text="", id_="i1", status="completed", thought="empty"),
+            interaction(text="ok", id_="i2"),
+        ]
+        backend = InteractionsBackend(fake_gemini.client(), config(), history="client")
+        assert backend.start("task", None).retryable_empty
+        assert backend.retry().text == "ok"
+        assert [s["type"] for s in fake_gemini.requests[1]["input"]] == ["user_input"]
+
     def test_old_screenshots_are_trimmed(self, fake_gemini):
         fake_gemini.responses = [interaction(calls=[("click", {"x": 1, "y": 2})], id_=f"i{i}") for i in range(4)]
         backend = InteractionsBackend(fake_gemini.client(), config(max_recent_screenshots=2), history="client")

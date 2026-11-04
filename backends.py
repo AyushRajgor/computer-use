@@ -190,6 +190,7 @@ class InteractionsBackend(ModelBackend):
         self._history_mode = history
         self._previous_interaction_id: Optional[str] = None
         self._history: list[dict[str, Any]] = []  # client-side history only
+        self._history_len_before_output = 0
         self._last_input: Any = None
         self._last_previous_id: Optional[str] = None
 
@@ -278,6 +279,8 @@ class InteractionsBackend(ModelBackend):
 
     def retry(self) -> ModelTurn:
         if self._history_mode == "client":
+            # Drop the empty/malformed model output before asking again.
+            del self._history[self._history_len_before_output :]
             return self._send(None)
         return self._send(self._last_input, previous_id=self._last_previous_id)
 
@@ -296,6 +299,7 @@ class InteractionsBackend(ModelBackend):
         interaction = self._call(lambda: self._client.interactions.create(**kwargs))
         turn = self.parse(interaction)
         if self._history_mode == "client":
+            self._history_len_before_output = len(self._history)
             self._history.extend(self._output_steps_as_dicts(interaction))
         elif _get(interaction, "id"):
             self._previous_interaction_id = _get(interaction, "id")

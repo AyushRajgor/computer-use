@@ -67,6 +67,9 @@ class BrowserUseComputer(CDPComputer):
         metadata: Optional[dict[str, str]] = None,
         **kwargs,
     ):
+        # The browser is created with the requested screen size; emulating a
+        # viewport over CDP would weaken its stealth fingerprint.
+        kwargs.setdefault("set_viewport", False)
         super().__init__(None, screen_size, initial_url, *args, **kwargs)
         self._api_key = api_key or os.environ.get("BROWSER_USE_API_KEY")
         self._profile_id = profile_id or _env_str("BROWSER_USE_PROFILE_ID")

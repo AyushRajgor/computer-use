@@ -346,9 +346,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     args.env = ENV_ALIASES.get(args.env, args.env)
     if args.env not in ENVIRONMENTS:
         raise SystemExit(f"Unknown --env {args.env!r}. Choose one of {', '.join(ENVIRONMENTS)}.")
-    if args.engine == "browser-use":
-        return run_browser_use_engine(args)
-    return run_gemini(args)
+    try:
+        if args.engine == "browser-use":
+            return run_browser_use_engine(args)
+        return run_gemini(args)
+    except (ValueError, RuntimeError, PermissionError, FileNotFoundError) as e:
+        # Setup problems (missing API key, no display, bad option, ...).
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

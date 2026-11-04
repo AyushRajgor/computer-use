@@ -19,6 +19,7 @@ it and only override how the browser is obtained (`_connect`) and released
 (`_disconnect`); all actions are shared.
 """
 import os
+import struct
 import sys
 import time
 from typing import Literal, Optional, Sequence
@@ -184,6 +185,7 @@ class PlaywrightComputer(Computer):
         self._page = None
         self._page_stack: list = []
         self._pending_pages: list = []
+        self._last_screenshot_size: Optional[tuple[int, int]] = None
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -561,12 +563,19 @@ class PlaywrightComputer(Computer):
         # scale="css" keeps the screenshot in CSS pixels, i.e. the same
         # coordinate space as mouse events, also on HiDPI / remote browsers.
         screenshot_bytes = self._page.screenshot(type="png", full_page=False, scale="css")
+        # The PNG header holds the size; with scale="css" it equals the viewport.
+        if screenshot_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            self._last_screenshot_size = struct.unpack(">II", screenshot_bytes[16:24])
         return EnvState(screenshot=screenshot_bytes, url=self._page.url)
 
     def screen_size(self) -> tuple[int, int]:
         viewport_size = self._page.viewport_size if self._page else None
         if viewport_size:
             return viewport_size["width"], viewport_size["height"]
+        if self._last_screenshot_size:
+            # Remote browsers without viewport emulation: the size of the
+            # screenshot the model just saw (no extra round trip per action).
+            return self._last_screenshot_size
         if self._page:
             # Remote browsers without viewport emulation: ask the page.
             try:

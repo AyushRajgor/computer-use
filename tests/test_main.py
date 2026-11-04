@@ -156,6 +156,11 @@ class TestMain:
             main.main(["--query", "q", "--env", "browseruse"])
         assert run.call_args.args[0].env == "browser-use"
 
+    def test_setup_errors_exit_cleanly(self, capsys):
+        with patch("main.BrowserbaseComputer", side_effect=ValueError("BROWSERBASE_API_KEY is not set.")):
+            assert main.main(["--query", "q", "--env", "browserbase"]) == 2
+        assert "BROWSERBASE_API_KEY" in capsys.readouterr().err
+
     def test_unknown_env(self):
         with pytest.raises(SystemExit):
             main.main(["--query", "q", "--env", "mars"])

@@ -77,6 +77,9 @@ class BrowserbaseComputer(CDPComputer):
         downloads_dir: Optional[str] = None,
         **kwargs,
     ):
+        # The session is created with the requested viewport; emulating it
+        # again over CDP is unnecessary and can weaken stealth.
+        kwargs.setdefault("set_viewport", False)
         super().__init__(None, screen_size, initial_url, *args, **kwargs)
         e = os.environ
         self._api_key = api_key or e.get("BROWSERBASE_API_KEY")
