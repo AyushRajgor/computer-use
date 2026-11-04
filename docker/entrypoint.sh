@@ -38,7 +38,10 @@ start_display() {
   IFS=',' read -r -a startup_apps <<< "${DESKTOP_STARTUP_APPS:-}"
   for app in "${startup_apps[@]}"; do
     app="$(echo "${app}" | xargs)"
-    [ -n "${app}" ] && (cd "${HOME}" && ${app} >/tmp/startup-app.log 2>&1 &)
+    [ -n "${app}" ] || continue
+    local log_name
+    log_name="$(basename "${app%% *}")"
+    (cd "${HOME}" && ${app} >"/tmp/startup-${log_name}.log" 2>&1 &)
   done
 
   local vnc_auth=(-nopw)

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Replaces Fluxbox's fbsetbg: the image ships no wallpaper tools, and the real
+# script opens an error popup that would confuse the agent. Use a solid color.
+exec fbsetroot -solid "${DESKTOP_BACKGROUND:-#2b3a4a}"

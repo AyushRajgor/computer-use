@@ -42,9 +42,10 @@ RUN if [ "$WITH_BROWSER_USE" = "true" ]; then sh scripts/install_engines.sh; fi
 
 COPY . .
 
-# Desktop helpers: a `chromium` launcher for the desktop environment and the
-# window-manager menu.
+# Desktop helpers: a `chromium` launcher for the desktop environment, a quiet
+# wallpaper setter (avoids a startup popup) and the window-manager menu.
 RUN install -m 0755 docker/chromium-launcher.sh /usr/local/bin/chromium \
+    && install -m 0755 docker/fbsetbg /usr/local/bin/fbsetbg \
     && install -m 0755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh \
     && useradd --create-home --uid 1000 --shell /bin/bash agent \
     && mkdir -p /home/agent/.fluxbox /home/agent/Desktop /app/runs \
