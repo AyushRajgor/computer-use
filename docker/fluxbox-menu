@@ -1,0 +1,8 @@
+[begin] (Computer Use)
+  [exec] (Terminal) {xterm -fa 'DejaVu Sans Mono' -fs 12}
+  [exec] (Browser) {chromium}
+  [exec] (Text Editor) {mousepad}
+  [exec] (Files) {pcmanfm}
+  [separator]
+  [restart] (Restart window manager)
+[end]

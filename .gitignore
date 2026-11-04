@@ -175,3 +175,8 @@ cython_debug/
 
 # Node stuff
 node_modules/
+
+# Agent run logs (trajectory + screenshots)
+runs/*
+!runs/.gitkeep
+downloads/
