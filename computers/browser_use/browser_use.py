@@ -151,7 +151,10 @@ class BrowserUseComputer(CDPComputer):
         from browser_use_sdk.v4 import BrowserUse  # optional dependency
 
         if not self._api_key:
-            raise ValueError("BROWSER_USE_API_KEY is not set.")
+            raise ValueError(
+                "BROWSER_USE_API_KEY is not set. Create one at "
+                "https://cloud.browser-use.com/settings?tab=api-keys and add it to your .env file."
+            )
         self._client = BrowserUse(api_key=self._api_key)
         self._session = self._client.browsers.create(**self.session_create_params())
         if not self._session.cdp_url:

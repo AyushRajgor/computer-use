@@ -104,6 +104,11 @@ def create_client() -> genai.Client:
             or "global",
         )
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY is not set. Get a key at https://aistudio.google.com/apikey "
+            "and add it to your .env file (see .env.example)."
+        )
     return genai.Client(api_key=api_key)
 
 

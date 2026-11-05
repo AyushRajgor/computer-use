@@ -155,6 +155,14 @@ class TestMain:
             main.main(["--query", "q", "--env", "browseruse"])
         assert run.call_args.args[0].env == "browser-use"
 
+    def test_missing_gemini_key_fails_before_browser_starts(self, monkeypatch, capsys):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        with patch("main.PlaywrightComputer") as computer:
+            assert main.main(["--query", "q"]) == 2
+        computer.assert_not_called()
+        assert "GEMINI_API_KEY is not set" in capsys.readouterr().err
+
     def test_setup_errors_exit_cleanly(self, capsys):
         with patch("main.BrowserbaseComputer", side_effect=ValueError("BROWSERBASE_API_KEY is not set.")):
             assert main.main(["--query", "q", "--env", "browserbase"]) == 2

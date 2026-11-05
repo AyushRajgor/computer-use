@@ -73,7 +73,7 @@ class TestBrowserbaseParams:
             "BROWSERBASE_PROJECT_ID": "proj",
             "BROWSERBASE_REGION": "eu-central-1",
             "BROWSERBASE_PROXY_COUNTRY": "de",
-            "BROWSERBASE_PROXY_CITY": "berlin",
+            "BROWSERBASE_PROXY_CITY": "Berlin",
             "BROWSERBASE_SOLVE_CAPTCHAS": "false",
             "BROWSERBASE_BLOCK_ADS": "true",
             "BROWSERBASE_RECORD_SESSION": "true",
@@ -93,7 +93,7 @@ class TestBrowserbaseParams:
         assert bs["allowed_domains"] == ["example.com"]
         assert params["project_id"] == "proj" and params["region"] == "eu-central-1"
         assert params["proxies"] == [
-            {"type": "browserbase", "geolocation": {"country": "DE", "city": "BERLIN"}}
+            {"type": "browserbase", "geolocation": {"country": "DE", "city": "Berlin"}}
         ]
         assert params["keep_alive"] is True and params["api_timeout"] == 900
         assert params["extension_id"] == "ext"
@@ -209,6 +209,15 @@ class TestCDP:
         computer._disconnect()
         new_tab.close.assert_not_called()  # left open so the result stays visible
         browser.close.assert_called_once()  # disconnects; does not kill the browser
+
+    def test_unreachable_running_browser_gives_actionable_error(self):
+        computer = CDPComputer("chrome")
+        computer._playwright = MagicMock()
+        computer._playwright.chromium.connect_over_cdp.side_effect = Exception(
+            "DevToolsActivePort file not found"
+        )
+        with pytest.raises(RuntimeError, match="chrome://inspect/#remote-debugging"):
+            computer._connect()
 
     def test_browser_name_is_case_insensitive(self):
         computer = CDPComputer(" Chrome ")

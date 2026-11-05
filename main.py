@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables from .env file
 
-from agent import ComputerUseAgent  # noqa: E402
+from agent import ComputerUseAgent, create_client  # noqa: E402
 from computers import (  # noqa: E402
     BrowserbaseComputer,
     BrowserUseComputer,
@@ -270,6 +270,7 @@ def _system_instruction(args: argparse.Namespace) -> Optional[str]:
 
 
 def run_gemini(args: argparse.Namespace) -> int:
+    client = create_client()  # fails fast on a missing key, before a browser starts
     env = build_computer(args)
     custom_functions = [YIELD_TO_USER] if args.hitl else []
     with env as computer:
@@ -278,6 +279,7 @@ def run_gemini(args: argparse.Namespace) -> int:
             query=args.query,
             model_name=args.model,
             verbose=not args.quiet,
+            client=client,
             api=args.api,
             history=args.history,
             thinking_level=args.thinking_level,

@@ -165,7 +165,7 @@ class BrowserbaseComputer(CDPComputer):
             if self._proxy_state:
                 geolocation["state"] = self._proxy_state.upper()
             if self._proxy_city:
-                geolocation["city"] = self._proxy_city.upper()
+                geolocation["city"] = self._proxy_city  # as written, e.g. "San Francisco"
             params["proxies"] = [{"type": "browserbase", "geolocation": geolocation}]
         elif self._proxies is not None:
             params["proxies"] = self._proxies
@@ -188,7 +188,10 @@ class BrowserbaseComputer(CDPComputer):
         import browserbase  # imported lazily so the dependency stays optional
 
         if not self._api_key:
-            raise ValueError("BROWSERBASE_API_KEY is not set.")
+            raise ValueError(
+                "BROWSERBASE_API_KEY is not set. Copy it from https://www.browserbase.com/sessions "
+                "into your .env file."
+            )
         self._bb = browserbase.Browserbase(api_key=self._api_key)
         self._session = self._bb.sessions.create(**self.session_create_params())
         self._cdp_url = self._session.connect_url

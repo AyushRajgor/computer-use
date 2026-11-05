@@ -97,9 +97,24 @@ class CDPComputer(PlaywrightComputer):
                 f"Attaching to your running {endpoint}. Click 'Allow' if it asks.",
                 color="cyan",
             )
-        self._browser = self._playwright.chromium.connect_over_cdp(
-            endpoint, timeout=self._connect_timeout_ms, headers=self._cdp_headers
-        )
+        try:
+            self._browser = self._playwright.chromium.connect_over_cdp(
+                endpoint, timeout=self._connect_timeout_ms, headers=self._cdp_headers
+            )
+        except Exception as e:  # noqa: BLE001 - turned into an actionable message
+            if not local_browser:
+                raise RuntimeError(
+                    f"Could not connect to the browser at {self._describe_endpoint()}: "
+                    f"{str(e).splitlines()[0]}"
+                ) from e
+            raise RuntimeError(
+                f"Could not attach to your running {endpoint}. Check that:\n"
+                f"  1. {endpoint} (version 144 or newer) is open on this computer,\n"
+                "  2. 'Allow remote debugging for this browser instance' is checked at\n"
+                "     chrome://inspect/#remote-debugging,\n"
+                "  3. you clicked 'Allow' when the browser asked.\n"
+                f"Details: {str(e).splitlines()[0]}"
+            ) from e
         viewport = {"width": self._screen_size[0], "height": self._screen_size[1]}
         if self._reuse_context and self._browser.contexts:
             # The default context holds the profile (cookies, logins, ...).
