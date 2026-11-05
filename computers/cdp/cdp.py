@@ -88,6 +88,9 @@ class CDPComputer(PlaywrightComputer):
     def _connect(self) -> None:
         endpoint = self._cdp_endpoint()
         local_browser = endpoint.strip().lower() in LOCAL_BROWSER_CHANNELS
+        if local_browser:
+            # Playwright matches browser names case-sensitively ("Chrome" fails).
+            endpoint = endpoint.strip().lower()
         self._own_tab = local_browser if self._own_tab_option is None else self._own_tab_option
         if local_browser:
             termcolor.cprint(

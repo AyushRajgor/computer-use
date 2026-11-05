@@ -210,6 +210,14 @@ class TestCDP:
         new_tab.close.assert_not_called()  # left open so the result stays visible
         browser.close.assert_called_once()  # disconnects; does not kill the browser
 
+    def test_browser_name_is_case_insensitive(self):
+        computer = CDPComputer(" Chrome ")
+        browser, _, new_tab = _fake_cdp_browser(computer)
+        computer._connect()
+        # Playwright only resolves the exact lowercase name.
+        assert computer._playwright.chromium.connect_over_cdp.call_args.args[0] == "chrome"
+        assert computer._page is new_tab
+
     def test_url_target_takes_over_first_tab(self):
         computer = CDPComputer("http://x:9222")
         _, existing, new_tab = _fake_cdp_browser(computer)
@@ -355,12 +363,12 @@ def test_cdp_own_tab_leaves_user_tabs_alone(fake_gemini, tmp_path):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}"
-    chrome = subprocess.Popen(
-        [executable, "--headless=new", f"--remote-debugging-port={port}",
-         f"--user-data-dir={tmp_path / 'profile'}", "--no-first-run",
-         "--no-default-browser-check", "about:blank"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    args = [executable, "--headless=new", f"--remote-debugging-port={port}",
+            f"--user-data-dir={tmp_path / 'profile'}", "--no-first-run",
+            "--no-default-browser-check", "about:blank"]
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        args.insert(1, "--no-sandbox")  # Chrome refuses to start as root otherwise
+    chrome = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             try:
