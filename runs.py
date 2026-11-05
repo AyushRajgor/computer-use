@@ -25,14 +25,13 @@ which also writes each session's report.html when the run ends.
 import argparse
 import pathlib
 import sys
-import webbrowser
 from typing import Any, Optional
 
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from report import report_link, write_report
+from report import open_in_browser, report_link, write_report
 from telemetry import (
     REPORT_FILE,
     RUNS_DIR,
@@ -262,7 +261,7 @@ def main(argv: Optional[list[str]] = None, console: Optional[Console] = None) ->
         path = write_report(session)
         console.print(report_link(path), soft_wrap=True)
         if args.open:
-            webbrowser.open(path.as_uri())
+            open_in_browser(path)
         return 0
     show_session(console, session)
     return 0

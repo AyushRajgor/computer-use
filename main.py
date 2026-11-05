@@ -48,6 +48,7 @@ from models import (  # noqa: E402
     SAFETY_POLICIES,
     THINKING_LEVELS,
 )
+from report import open_in_browser  # noqa: E402
 from telemetry import RUNS_DIR  # noqa: E402
 
 PLAYWRIGHT_SCREEN_SIZE = (1440, 900)
@@ -204,6 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True if run_logs is None else run_logs,
         help="Save this session (steps, tool calls, timing, tokens, screenshots) to "
         "runs/<session id>/. See sessions with: python runs.py",
+    )
+    g.add_argument(
+        "--open_report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Open the session's report in your web browser when the run ends.",
     )
     g.add_argument("--quiet", action="store_true", help="Only print the final result.")
 
@@ -382,6 +389,10 @@ def run_gemini(args: argparse.Namespace) -> int:
         result = agent.agent_loop()
     if args.quiet:
         print(result.final_text or result.error or result.status)
+    if result.report_path and args.open_report:
+        # Not left to the printed link: VS Code and Cursor open a file:// link
+        # from their terminal in the editor.
+        open_in_browser(result.report_path)
     return 0 if result.ok else 1
 
 

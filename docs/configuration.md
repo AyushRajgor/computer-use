@@ -26,20 +26,27 @@ supported location works there).
 
 ## Models
 
-| Model | Status | Notes |
-|-|-|-|
-| `gemini-3.8-flash` | **Default, recommended** | Thinking `low` / `medium` (default) / `high`; `minimal` is not supported |
-| `gemini-4-argon` | GA | Most capable; complex reasoning and long UI workflows |
-| `gemini-3.6-flash` | GA | Previous Flash generation |
-| `gemini-3.5-flash-lite` | GA | Lowest latency and cost |
-| `gemini-3-flash-preview` | Preview | Legacy action names; no prompt injection detection |
-| `gemini-3.7-flash` | Deprecated | Requests are routed to `gemini-3.8-flash` |
-| `gemini-3.5-flash` | Deprecated | Requests are routed to `gemini-3.6-flash` |
-| `gemini-2.5-computer-use-preview-10-2025` | **Shut down** (July 28, 2026) | Use `gemini-3.8-flash` |
+| Model | Status | Price, input / output per 1M tokens | Notes |
+|-|-|-|-|
+| `gemini-3.8-flash` | **Default, recommended** | $0.75 / $3.75; $1.50 / $7.50 from Jan 1, 2027 | Thinking `low` / `medium` (default) / `high`; `minimal` is not supported |
+| `gemini-4-argon` | GA | $2.00 / $10.00; $4.00 / $20.00 from Dec 1, 2026 | Most capable; complex reasoning and long UI workflows |
+| `gemini-3.6-flash` | GA | $0.75 / $3.75; $1.50 / $7.50 from Jan 1, 2027 | Previous Flash generation |
+| `gemini-3.5-flash-lite` | GA | $0.30 / $2.50 | Lowest latency and cost |
+| `gemini-3-flash-preview` | Preview | $0.50 / $3.00 | Legacy action names; no prompt injection detection |
+| `gemini-3.7-flash` | Deprecated | As `gemini-3.8-flash` | Requests are routed to `gemini-3.8-flash` |
+| `gemini-3.5-flash` | Deprecated | As `gemini-3.6-flash` | Requests are routed to `gemini-3.6-flash` |
+| `gemini-2.5-computer-use-preview-10-2025` | **Shut down** (July 28, 2026) | - | Use `gemini-3.8-flash` |
 
 `--thinking_level low` is faster and usually enough for UI automation.
+Prices are the paid tier's Standard rates (the free tier costs nothing):
+thinking tokens are billed as output, and cached input is billed at a much
+lower rate (a tenth of the input price on the Flash models).
+They are in `PRICES` in `models.py`, dated, and the report's estimated cost
+uses the rates in force on the day of the run; update them there when Google
+changes them.
 Sources: [model versions](https://aistudio.google.com/docs/computer-use#model-versions),
-[deprecations](https://aistudio.google.com/docs/deprecations).
+[deprecations](https://aistudio.google.com/docs/deprecations),
+[pricing](https://aistudio.google.com/docs/pricing) (checked November 5, 2026).
 
 ## All flags
 
@@ -91,6 +98,7 @@ Sources: [model versions](https://aistudio.google.com/docs/computer-use#model-ve
 | Flag | Env var | Default | Purpose |
 |-|-|-|-|
 | `--log` / `--no-log` | `RUN_LOGS` | on | Save each session (steps, tool calls, timing, tokens, screenshots, a report page) to `runs/`; see them with `python runs.py` ([features.md](features.md#session-logs)) |
+| `--[no-]open_report` | | on | Open the session's report in your web browser when the run ends |
 | `--quiet` | | off | Print only the final answer |
 
 Cloud browser settings (`BROWSERBASE_*`, `BROWSER_USE_*`) are listed in

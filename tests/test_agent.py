@@ -14,6 +14,7 @@
 import datetime
 import json
 import os
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -546,12 +547,31 @@ class TestTelemetry:
             log_dir=str(tmp_path),
         )
         out = capsys.readouterr().out
-        assert "waiting for Gemini" in out and "Tools: 1 call(s) (wait 1)" in out
-        assert "Tokens: 1,200 total (input 1,000)" in out
         report = tmp_path / result.session_id / "report.html"
         assert result.report_path == str(report) and report.is_file()
-        assert f"Report: {report.resolve().as_uri()}" in out
-        assert f"python runs.py {result.session_id}" in out
+        expected = [
+            "",
+            "Agent finished: completed after 2 steps in N",
+            "",
+            "  ok",
+            "",
+            "  Time     N waiting for Gemini, N running actions",
+            "  Tools    1 call: wait 1",
+            "  Tokens   1,200 total (input 1,000)",
+            "",
+            f"  Report   {report.resolve().as_uri()}",  # one line: the link stays clickable
+            f"  Session  {result.session_id}  (in the terminal: python runs.py {result.session_id})",
+        ]
+        lines = re.sub(r"\b\d+\.\ds\b", "N", out).splitlines()
+        start = lines.index(expected[1]) - 1
+        assert lines[start : start + len(expected)] == expected
+
+    def test_summary_of_a_failed_run(self, capsys):
+        run_with([ModelTurn(error="Quota exceeded.")], verbose=True)
+        out = capsys.readouterr().out
+        assert "Agent finished: error after 1 step in" in out
+        assert "\n\n  Quota exceeded.\n\n  Time " in out
+        assert "Report" not in out and "Session" not in out  # nothing was saved
 
 
 def test_yield_to_user_without_tty(monkeypatch):

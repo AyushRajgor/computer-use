@@ -33,6 +33,7 @@ import termcolor
 from google import genai
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from backends import (
     BackendConfig,
@@ -76,6 +77,9 @@ FunctionResponseT = Union[EnvState, dict]
 
 MAX_WAIT_SECONDS = 60
 MAX_EMPTY_RETRIES = 3
+
+# The end-of-run summary's rows: "  Session  <value>" (the longest label + 2).
+SUMMARY_LABEL_WIDTH = 9
 
 # Kept for backwards compatibility with earlier versions of this repository.
 MAX_RECENT_TURN_WITH_SCREENSHOTS = 3
@@ -164,6 +168,29 @@ def _response_id(turn: ModelTurn) -> Optional[str]:
         if isinstance(value, str):
             return value
     return None
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
+def _print_indented(text: Text, indent: int = 2) -> None:
+    """Prints text wrapped to the terminal, every line indented, with no
+    trailing spaces (rich pads wrapped renderables to the full width)."""
+    for line in text.wrap(console, max(20, console.width - indent)):
+        line.rstrip()
+        console.print(Text.assemble(" " * indent, line), soft_wrap=True, highlight=False)
+
+
+def print_summary_rows(rows: Sequence[tuple[str, Union[str, Text]]]) -> None:
+    """Prints a group of end-of-run summary rows after a blank line, values
+    aligned. Rows aren't wrapped, so a long report link stays clickable."""
+    if not rows:
+        return
+    console.print()
+    for label, value in rows:
+        line = Text.assemble(("  " + label.ljust(SUMMARY_LABEL_WIDTH), "bold"), value)
+        console.print(line, soft_wrap=True, highlight=False)
 
 
 class _TerminateLoop(Exception):
@@ -826,39 +853,62 @@ class ComputerUseAgent:
 
     @staticmethod
     def _print_summary(result: AgentResult) -> None:
+        """The end of a run in the terminal: how it ended, the answer, then
+        aligned rows of numbers and where the session's report is."""
+        sys.stdout.flush()  # termcolor/print earlier, rich here: keep the order
         color = "green" if result.ok else "red"
-        termcolor.cprint(
-            f"\nAgent finished: {result.status} after {result.steps} step(s) "
-            f"in {format_duration(result.duration_s)}.",
-            color=color,
-            attrs=["bold"],
+        console.print()
+        console.print(
+            Text(
+                f"Agent finished: {result.status} after {_count(result.steps, 'step')} "
+                f"in {format_duration(result.duration_s)}",
+                style=f"bold {color}",
+            )
         )
-        if result.final_text:
-            print(result.final_text)
-        if result.error:
-            termcolor.cprint(result.error, color=color)
-        print(
-            f"Time: {format_duration(result.model_s)} waiting for Gemini, "
-            f"{format_duration(result.actions_s)} running actions"
-        )
+        for text, style in ((result.final_text, ""), (result.error, color)):
+            if text and text.strip():
+                console.print()
+                _print_indented(Text(text.strip(), style=style))
+
+        rows: list[tuple[str, Union[str, Text]]] = [
+            (
+                "Time",
+                f"{format_duration(result.model_s)} waiting for Gemini, "
+                f"{format_duration(result.actions_s)} running actions",
+            )
+        ]
         if result.tool_calls:
             counts = sorted(result.tool_calls.items(), key=lambda kv: -kv[1])
-            failed = f", {result.tool_errors} failed" if result.tool_errors else ""
-            print(
-                f"Tools: {sum(result.tool_calls.values())} call(s) ("
-                + ", ".join(f"{name} {n}" for name, n in counts)
-                + f"){failed}"
+            failed = f" ({result.tool_errors} failed)" if result.tool_errors else ""
+            rows.append(
+                (
+                    "Tools",
+                    f"{_count(sum(result.tool_calls.values()), 'call')}: "
+                    + ", ".join(f"{name} {n}" for name, n in counts)
+                    + failed,
+                )
             )
         retries = [f"{n} {kind.replace('_', ' ')}" for kind, n in result.retries.items() if n]
         if retries:
-            print("Retries: " + ", ".join(retries))
+            rows.append(("Retries", ", ".join(retries)))
         if result.usage:
-            print(f"Tokens: {format_tokens(result.usage)}")
+            rows.append(("Tokens", format_tokens(result.usage)))
+        print_summary_rows(rows)
+
+        where: list[tuple[str, Union[str, Text]]] = []
         if result.report_path:
-            sys.stdout.flush()  # termcolor/print above, rich below: keep the order
-            console.print(report_link(result.report_path), soft_wrap=True, highlight=False)
+            where.append(("Report", report_link(result.report_path, label="")))
         if result.log_dir:
-            print(f"Session: {result.session_id}  (in the terminal: python runs.py {result.session_id})")
+            where.append(
+                (
+                    "Session",
+                    Text.assemble(
+                        result.session_id or "",
+                        (f"  (in the terminal: python runs.py {result.session_id})", "dim"),
+                    ),
+                )
+            )
+        print_summary_rows(where)
 
 
 # Backwards compatible name.

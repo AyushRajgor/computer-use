@@ -77,25 +77,44 @@ prompt, Ctrl+C) is logged too, marked with `"stopped"`. A session without a
 `result.json` was killed or is still running.
 
 The end of every run prints a summary with a link to the report. It is printed
-whether the run completed, failed, hit `--max_steps` or was stopped with Ctrl+C;
-most terminals open it with Ctrl+click:
+whether the run completed, failed, hit `--max_steps` or was stopped with Ctrl+C,
+and the report opens in your browser (`--no-open_report` leaves it closed). The
+link works with Ctrl+click in most terminals; VS Code and Cursor open it in the
+editor instead.
 
 ```
-Agent finished: completed after 7 step(s) in 1m 32s.
-Time: 58.2s waiting for Gemini, 21.4s running actions
-Tools: 12 call(s) (click 5, type 3, navigate 2, scroll 2), 1 failed
-Tokens: 48,210 total (input 46,900, output 410, thought 900)
-Report: file:///D:/projects/computer-use/runs/20261105-141500-a3f9c1/report.html
-Session: 20261105-141500-a3f9c1  (in the terminal: python runs.py 20261105-141500-a3f9c1)
+Agent finished: completed after 7 steps in 1m 32s
+
+  The Louvre is open 9:00-18:00 every day except Tuesday.
+
+  Time     58.2s waiting for Gemini, 21.4s running actions
+  Tools    12 calls: click 5, type 3, navigate 2, scroll 2 (1 failed)
+  Tokens   48,210 total (input 46,900, output 410, thought 900)
+
+  Report   file:///D:/projects/computer-use/runs/20261105-141500-a3f9c1/report.html
+  Session  20261105-141500-a3f9c1  (in the terminal: python runs.py 20261105-141500-a3f9c1)
 ```
 
 The report shows how the run ended (the answer, or the error and the step it
-stopped at), the totals (time split between Gemini and actions, steps, actions,
-tokens), the task, a strip of every screenshot, and each step: the model's
-reasoning, each action in words with its arguments and result, and the
-screenshot after it. Click a screenshot to page through them full size with
-← and →. It follows your system's light or dark mode, works offline, and links
-the screenshots by name, so the session folder can be zipped and shared.
+stopped at), its estimated cost (input, cached input and output at the paid
+tier's Standard rates for the model on the day of the run; each step's cost
+too), the totals (time split between Gemini and actions, steps, actions,
+tokens), and the task. Overview, Activity and Settings tabs separate the result,
+execution log and run configuration. The overview shows the session result
+with one screenshot preview, regardless of the number of captures. Controls
+above it let you move backward/forward or jump to any capture using a selector;
+the preview supports left/right arrow keys, Home and End. A View step link opens
+the corresponding action in Activity. Summary figures show their breakdowns
+directly. Long answers and tasks have a Show full control; copying and printing
+include the full text. In Activity, the timeline lets you inspect each step:
+the model's reasoning, each action in words with its arguments and result,
+and the screenshot after it. Click the preview or a step's screenshot to page
+through captures full size with ← and →. The report starts in light mode;
+the theme button switches to dark mode and remembers your choice when browser
+storage is available. Tabs support arrow keys, Home and End; links to steps
+open Activity directly. Without JavaScript, all sections remain visible.
+It works offline and links screenshots by name, so the session folder can be
+zipped and shared.
 
 In Docker, the summary prints `runs/<session id>/report.html` instead of a
 link, since a `file://` link would point inside the container: open it from

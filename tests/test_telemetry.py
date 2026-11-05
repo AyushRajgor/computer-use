@@ -15,6 +15,7 @@
 import datetime
 import io
 import json
+from html.parser import HTMLParser
 
 import pytest
 from rich.console import Console
@@ -85,6 +86,38 @@ def output(*argv) -> tuple[int, str]:
     console = Console(file=io.StringIO(), width=200)
     code = runs.main(list(argv), console=console)
     return code, console.file.getvalue()
+
+
+def report_element_contexts(markup):
+    class Elements(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.elements = []
+            self.stack = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            self.elements.append((tag, attrs, tuple(self.stack)))
+            if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+                self.stack.append((tag, attrs))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
+
+    parser = Elements()
+    parser.feed(markup)
+    return parser.elements
+
+
+def report_elements(markup):
+    return [(tag, attrs) for tag, attrs, _ in report_element_contexts(markup)]
+
+
+def report_links(markup):
+    return [attrs for tag, attrs in report_elements(markup) if tag == "a"]
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +390,8 @@ def test_report_shows_clock_times_from_the_log(tmp_path):
     )
     html = report.render_report(load_session(tmp_path / OLD)).replace(" ", " ")  # figures don't wrap inside
     assert "Nov 5, 2026 at 14:15:00 → 14:17:05" in html  # the run
-    assert "14:15:00 → 14:17:05" in html and "Gemini 1m 40s · actions 20.0s · other 5.5s" in html
+    split = '<li class=""><span>{}</span><span class="kpi-num">{}</span></li>'.format
+    assert split("Gemini", "1m 40s") in html and split("Actions", "20.0s") in html and split("Other", "5.5s") in html
     assert "14:15:01 → 14:15:02 (+0:01)" in html  # the step: started_at → time, offset from the start
     # Logs without each action's times: the step's end, minus the actions that ran after it.
     assert "14:15:01 → 14:15:01 (+0:01) · took 0.5s" in html  # navigate: 14:15:01.0 → 14:15:01.5
@@ -387,15 +421,20 @@ def test_report_puts_results_in_words(tmp_path):
     results[4]["payload"] = {"active_window": "Notepad"}
     results[5]["payload"] = {"user_response": None, "error": "No interactive user is available."}
     steps[0]["calls"].append({"id": "c17", "name": "wait", "args": {}})  # no result: not run
+    steps[0]["calls"][0]["args"]["url"] = "https://example.com/a"
     write_session(tmp_path, OLD, steps=steps, result={"status": "completed"})
     html = report.render_report(load_session(tmp_path / OLD))
     assert "Sent back to Gemini" in html and "Raw call and result (JSON)" in html
-    assert 'Page after: <a href="https://example.com/a" rel="noopener noreferrer" target="_blank">' in html
-    assert "Safety confirmation: you (or --safety auto-confirm) approved this action." in html
-    assert '<li class="line-error">Failed: Timeout 30000ms exceeded</li>' in html
-    assert "Your reply: 123456" in html and "Page after: javascript:alert(1)" in html  # not a link
-    assert "result: [1, 2]" in html and "Active window: Notepad" in html
-    assert "Error reported: No interactive user is available." in html and "No reply from you." in html
+    row = '<div class="kv-row line-{}"><dt>{}</dt><dd>{}</dd></div>'.format
+    link = '<a href="https://example.com/a" rel="noopener noreferrer" target="_blank">https://example.com/a</a>'
+    assert row("url", "Page after", link) in html
+    assert row("text", "Safety confirmation", "you (or --safety auto-confirm) approved this action.") in html
+    assert row("error", "Failed", "Timeout 30000ms exceeded") in html
+    assert row("text", "Your reply", "123456") in html
+    assert row("url", "Page after", "javascript:alert(1)") in html  # not a link
+    assert row("text", "result", "[1, 2]") in html and row("text", "Active window", "Notepad") in html
+    assert row("error", "Error reported", "No interactive user is available.") in html and "No reply from you." in html
+    assert '<div class="kv-row kv-code"><dt>url</dt>' in html  # the arguments, one row each
     assert "Not run: the run stopped before this action." in html and html.count('class="action') >= 7
     assert "&quot;safety_acknowledgement&quot;: true" in html  # the raw JSON is still there, escaped
 
@@ -408,8 +447,130 @@ def test_report_reserves_room_for_screenshots(tmp_path):
     record["results"][0]["screenshot"] = "step_001_0_click.png"
     (path / "trajectory.jsonl").write_text(json.dumps(record) + "\n")
     html = report.render_report(load_session(path))
-    assert html.count('src="step_001_0_click.png" width="1440" height="900"') == 2  # strip + thumbnail
-    assert 'class="shot thumb-shot" href="step_001_0_click.png"' in html and "shot-large" not in html
+    assert html.count('src="step_001_0_click.png" width="1440" height="900"') == 2  # preview + step
+    assert 'class="shot shot-full" href="step_001_0_click.png"' in html
+
+
+def test_report_preview_uses_latest_valid_screenshot(tmp_path):
+    records = [step(n, "click") for n in range(1, 6)]
+    captures = ["first.png", "last & capture.png", "missing.png", "../outside.png", "page.html"]
+    for record, capture in zip(records, captures):
+        record["results"][0]["screenshot"] = capture
+    path = write_session(tmp_path, OLD, steps=records)
+    for name in ("first.png", "last & capture.png", "page.html"):
+        (path / name).write_bytes(b"capture")
+    (tmp_path / "outside.png").write_bytes(b"outside session")
+
+    markup = report.render_report(load_session(path))
+    links = report_links(markup)
+    preview = next(link for link in links if link.get("id") == "preview-shot")
+    elements = report_element_contexts(markup)
+    options = [attrs for tag, attrs, ancestors in elements if tag == "option"
+               and any(parent == "select" and props.get("id") == "capture-select" for parent, props in ancestors)]
+    assert preview["href"] == "last%20%26%20capture.png"
+    assert [option["value"] for option in options] == ["first.png", "last%20%26%20capture.png"]
+    assert [option["value"] for option in options if "selected" in option] == [preview["href"]]
+
+
+def test_report_preview_escapes_captions(tmp_path):
+    hostile = 'https://example.com/?q="><img src=x onerror=alert(1)>&tag=1'
+    record = step(1, "navigate")
+    record["calls"][0]["args"].pop("intent")
+    record["calls"][0]["args"]["url"] = hostile
+    record["results"][0]["screenshot"] = "capture.png"
+    path = write_session(tmp_path, OLD, steps=[record])
+    (path / "capture.png").write_bytes(b"capture")
+
+    markup = report.render_report(load_session(path))
+    options = [attrs for tag, attrs in report_elements(markup) if tag == "option"]
+    assert len(options) == 1 and hostile in options[0]["data-caption"]
+    assert options[0]["value"] == "capture.png" and "onerror" not in options[0]
+    assert '<img src=x onerror=alert(1)>' not in markup
+
+
+@pytest.mark.parametrize("records", [(), (step(1, "click"),)])
+def test_report_has_no_gallery_without_captures(tmp_path, records):
+    path = write_session(tmp_path, OLD, steps=records)
+    markup = report.render_report(load_session(path))
+    links = report_links(markup)
+    assert not any(link.get("id") == "preview-shot" for link in links)
+    assert not any(attrs.get("id") == "capture-select" for _, attrs in report_elements(markup))
+
+
+def test_report_many_captures_have_one_overview_image(tmp_path):
+    records = [step(n, "click") for n in range(1, 51)]
+    for n, record in enumerate(records, 1):
+        record["results"][0]["screenshot"] = f"capture_{n:03d}.png"
+    path = write_session(tmp_path, OLD, steps=records)
+    for record in records:
+        (path / record["results"][0]["screenshot"]).write_bytes(b"capture")
+
+    elements = report_element_contexts(report.render_report(load_session(path)))
+    options = [attrs for tag, attrs, ancestors in elements if tag == "option"
+               and any(parent == "select" and props.get("id") == "capture-select" for parent, props in ancestors)]
+    images = [(attrs, ancestors) for tag, attrs, ancestors in elements if tag == "img" and attrs.get("src")]
+    overview_images = [attrs for attrs, ancestors in images if any(props.get("id") == "overview" for _, props in ancestors)]
+    assert len(options) == 50 and len(images) == 51  # one preview plus each step; viewer starts without a source
+    assert len(overview_images) == 1 and overview_images[0]["src"] == "capture_050.png"
+    assert [option["value"] for option in options if "selected" in option] == ["capture_050.png"]
+
+
+def test_report_metric_breakdowns_are_visible_without_disclosures(tmp_path):
+    usage = {"total_input_tokens": 1_000, "total_cached_tokens": 400, "total_output_tokens": 20,
+             "total_thought_tokens": 10, "total_tokens": 1_030}
+    path = write_session(tmp_path, OLD, steps=[step(1, "click", usage=usage)], result={"status": "completed"})
+    elements = report_element_contexts(report.render_report(load_session(path)))
+    rows = [ancestors for _, attrs, ancestors in elements if "kpi-rows" in attrs.get("class", "").split()]
+    assert len(rows) == 5
+    assert not any(tag == "details" or "hidden" in attrs for ancestors in rows for tag, attrs in ancestors)
+
+
+@pytest.mark.parametrize("records", [(), (step(1, "click"),)])
+def test_report_panels_are_linked_and_readable_without_javascript(tmp_path, records):
+    hostile = '\"><button id="injected" onclick="alert(1)">Task</button>'
+    path = write_session(tmp_path, OLD, query=hostile, steps=records)
+    elements = report_elements(report.render_report(load_session(path)))
+    for name in ("overview", "activity", "settings"):
+        tabs = [(tag, attrs) for tag, attrs in elements if attrs.get("id") == f"tab-{name}"]
+        panels = [(tag, attrs) for tag, attrs in elements if attrs.get("id") == name]
+        assert len(tabs) == 1 and len(panels) == 1
+        tag, tab = tabs[0]
+        assert tag == "a" and tab["href"] == f"#{name}" and tab["aria-controls"] == name
+        _, panel = panels[0]
+        assert "report-panel" in panel.get("class", "").split() and "hidden" not in panel
+    assert not any(attrs.get("id") == "injected" for _, attrs in elements)
+    assert not any(key.lower().startswith("on") for _, attrs in elements for key in attrs)
+
+
+def test_report_has_no_settings_panel_without_run_json(tmp_path):
+    path = write_session(tmp_path, OLD, steps=[step(1, "click")], run=False)
+    elements = report_elements(report.render_report(load_session(path)))
+    ids = [attrs.get("id") for _, attrs in elements]
+    assert "settings" not in ids and "tab-settings" not in ids
+    assert all(name in ids for name in ("overview", "activity", "tab-overview", "tab-activity"))
+
+
+def test_report_estimates_the_cost(tmp_path):
+    usage = {"total_input_tokens": 100_000, "total_cached_tokens": 40_000, "total_output_tokens": 2_000, "total_tokens": 102_000}
+    steps = [step(1, "click", usage=usage), step(2, "click", usage=usage)]
+    write_session(tmp_path, OLD, steps=steps, result={"status": "completed"})
+    html = report.render_report(load_session(tmp_path / OLD))
+    # Each step: 60,000 × $0.75 + 40,000 × $0.075 + 2,000 × $3.75 per 1M = $0.0555; the run: two of them.
+    assert '<dd class="kpi-value">$0.1110</dd>' in html and "Estimated cost" in html
+    assert '<span>Cached input</span><span class="kpi-num">$0.0060</span>' in html
+    assert '<span>Output + thinking</span><span class="kpi-num">$0.0150</span>' in html
+    assert '<dd class="sstat-value">$0.0555</dd>' in html  # each step's own cost
+    assert "for gemini-3.8-flash." in html and "billed as" not in html
+
+
+def test_report_without_a_price(tmp_path):
+    path = write_session(tmp_path, OLD, steps=[step(1, "click")], result={"status": "completed"})
+    run = json.loads((path / "run.json").read_text())
+    (path / "run.json").write_text(json.dumps({**run, "model": "my-tuned-model"}))
+    html = report.render_report(load_session(path))
+    assert "No price on file for my-tuned-model." in html and '<dd class="kpi-value">-</dd>' in html
+    write_session(tmp_path, NEW, steps=[step(1, "click")], result={"status": "completed"}, run=False)
+    assert "this session has no run.json" in report.render_report(load_session(tmp_path / NEW))
 
 
 @pytest.mark.parametrize(
@@ -448,7 +609,7 @@ def test_a_broken_report_does_not_stop_the_run(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert result.ok and result.report_path is None
     assert "could not write the session report: disk full" in captured.err
-    assert "Report:" not in captured.out and result.session_id in captured.out
+    assert "Report" not in captured.out and result.session_id in captured.out
     saved = json.loads((tmp_path / result.session_id / "result.json").read_text())
     assert saved["status"] == "completed" and saved["report_path"] is None
 

@@ -126,10 +126,11 @@ Add `--env browserbase` or `--env browser-use` for the cloud browsers. More in
 | `--allowed_domains example.com` | Only let the agent visit these sites |
 | `--hitl` | Let the agent ask you for input, e.g. a 2FA code |
 | `--no-log` | Don't save this session |
+| `--no-open_report` | Don't open the report in your browser when the run ends |
 
 Every run is saved as a session in `runs/` (steps, tool calls, timing, tokens,
-screenshots). When a run ends, completed or not, it prints a link to the
-session's report: a page with the answer or error, every step and its
+screenshots). When a run ends, completed or not, the session's report opens
+in your browser: a page with the answer or error, every step and its
 screenshot. List sessions with `python runs.py`. More in
 [docs/features.md](docs/features.md#session-logs).
 
