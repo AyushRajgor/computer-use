@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import io
 from unittest.mock import patch
 
 import pytest
@@ -114,6 +115,78 @@ class TestBuildComputer:
         assert kwargs["allowed_domains"] == ["example.com", "google.com"]
         assert kwargs["tab_mode"] == "follow"
         assert kwargs["screen_size"] == (1440, 900)
+
+
+TASK = 'Search for "weather in Paris".\nThen:\n1. Open the first result\n2. Tell me the temperature'
+
+
+class FakeTerminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def task_args(*argv):
+    return main.build_parser().parse_args(list(argv))
+
+
+class TestQuery:
+    def test_query_file_keeps_newlines_and_quotes(self, tmp_path):
+        f = tmp_path / "task.txt"
+        f.write_text(TASK + "\n", encoding="utf-8")
+        assert main.resolve_query(task_args("--query_file", str(f))) == TASK
+
+    def test_query_file_from_windows_powershell(self, tmp_path):
+        f = tmp_path / "task.txt"  # what `"..." > task.txt` writes in PowerShell 5.1
+        f.write_bytes(("﻿" + TASK.replace("\n", "\r\n") + "\r\n").encode("utf-16-le"))
+        assert main.resolve_query(task_args("--query-file", str(f))) == TASK
+
+    def test_query_file_not_utf8(self, tmp_path):
+        f = tmp_path / "task.bin"
+        f.write_bytes(b"caf\xe9")
+        with pytest.raises(ValueError, match="UTF-8"):
+            main.resolve_query(task_args("--query_file", str(f)))
+
+    def test_typed_or_pasted_in_a_terminal(self, capsys):
+        assert main.resolve_query(task_args(), stdin=FakeTerminal(TASK + "\n")) == TASK
+        assert "paste the task" in capsys.readouterr().out
+
+    def test_piped(self, capsys):
+        assert main.resolve_query(task_args(), stdin=io.StringIO(TASK)) == TASK
+        assert capsys.readouterr().out == ""
+        # Windows PowerShell pipes a byte order mark first.
+        assert main.resolve_query(task_args(), stdin=io.StringIO("﻿" + TASK)) == TASK
+
+    def test_empty_task(self):
+        with pytest.raises(ValueError, match="empty"):
+            main.resolve_query(task_args(), stdin=io.StringIO("  \n"))
+        with pytest.raises(ValueError, match="empty"):
+            main.resolve_query(task_args("--query", " "))
+
+    def test_query_and_query_file_are_exclusive(self):
+        with pytest.raises(SystemExit):
+            task_args("--query", "q", "--query_file", "task.txt")
+
+    @patch("main.PlaywrightComputer")
+    @patch("main.ComputerUseAgent")
+    def test_main_with_query_file(self, mock_agent, mock_computer, tmp_path):
+        mock_agent.return_value.agent_loop.return_value = ok_result()
+        f = tmp_path / "task.txt"
+        f.write_text(TASK, encoding="utf-8")
+        assert main.main(["--query_file", str(f)]) == 0
+        assert mock_agent.call_args.kwargs["query"] == TASK
+
+    def test_main_without_a_task_exits_cleanly(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin", io.StringIO(""))
+        with patch("main.PlaywrightComputer") as computer:
+            assert main.main([]) == 2
+        computer.assert_not_called()
+        assert "The task is empty" in capsys.readouterr().err
+
+    def test_missing_query_file(self, capsys):
+        with patch("main.PlaywrightComputer") as computer:
+            assert main.main(["--query_file", "no-such-task.txt"]) == 2
+        computer.assert_not_called()
+        assert "no-such-task.txt" in capsys.readouterr().err
 
 
 class TestMain:

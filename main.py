@@ -14,11 +14,14 @@
 """Command line interface for the Gemini Computer Use agent.
 
     python main.py --query "Go to Google and search for 'Hello World'"
+    python main.py --query_file task.txt     # a long, multi-line task
+    python main.py                           # type or paste the task when asked
 
 Every flag also has an environment variable default (see .env.example), so the
 same command works locally, in Docker and in CI.
 """
 import argparse
+import codecs
 import os
 import signal
 import sys
@@ -85,7 +88,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the Gemini Computer Use agent with a query.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--query", type=str, required=True, help="The task for the agent.")
+    task = parser.add_mutually_exclusive_group()
+    task.add_argument(
+        "--query",
+        type=str,
+        help="The task for the agent. Leave out --query and --query_file to type "
+        "or paste it (multi-line is fine) when asked, or pipe it in.",
+    )
+    task.add_argument(
+        "--query_file",
+        "--query-file",
+        dest="query_file",
+        help="Read the task from this text file (UTF-8 or UTF-16).",
+    )
     parser.add_argument(
         "--env",
         type=str,
@@ -262,6 +277,41 @@ def build_computer(args: argparse.Namespace):
     raise ValueError(f"Unknown environment: {args.env}. Choose one of {', '.join(ENVIRONMENTS)}.")
 
 
+def _decode_text(data: bytes, source: str) -> str:
+    # Editors save UTF-8; Windows PowerShell 5.1's `>` and Out-File save UTF-16.
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = data.decode("utf-16")
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise ValueError(f"{source} is not UTF-8 text; save it as UTF-8 and try again.") from None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def resolve_query(args: argparse.Namespace, stdin=None) -> str:
+    """The task: --query, else --query_file, else read from stdin (typed or
+    pasted in a terminal, or piped). Text arrives exactly as written,
+    newlines and quotes included."""
+    stdin = stdin if stdin is not None else sys.stdin
+    if args.query is not None:
+        query = args.query
+    elif args.query_file:
+        with open(args.query_file, "rb") as f:
+            query = _decode_text(f.read(), args.query_file)
+    else:
+        if stdin is None:
+            raise ValueError('No task given. Use --query "..." or --query_file FILE.')
+        if stdin.isatty():
+            done = "Ctrl+Z, then Enter" if sys.platform == "win32" else "Ctrl+D"
+            print(f"Type or paste the task. When done, press Enter, then {done}:", flush=True)
+        query = stdin.read()
+    query = query.lstrip("﻿").strip()  # PowerShell pipes a byte order mark
+    if not query:
+        raise ValueError('The task is empty. Use --query "...", --query_file FILE, or type it when asked.')
+    return query
+
+
 def _system_instruction(args: argparse.Namespace) -> Optional[str]:
     if args.system_instruction_file:
         with open(args.system_instruction_file, encoding="utf-8") as f:
@@ -271,6 +321,7 @@ def _system_instruction(args: argparse.Namespace) -> Optional[str]:
 
 def run_gemini(args: argparse.Namespace) -> int:
     client = create_client()  # fails fast on a missing key, before a browser starts
+    args.query = resolve_query(args)  # asks for the task before a browser starts
     env = build_computer(args)
     custom_functions = [YIELD_TO_USER] if args.hitl else []
     with env as computer:

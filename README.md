@@ -85,6 +85,22 @@ python main.py --env browser-use --query "Search Google for the weather in Paris
 
 A live-view link is printed; the cloud browser is stopped at the end.
 
+### Long or multi-line tasks
+
+Leave out `--query` and paste the task when asked. Newlines, numbered lists
+and quotes are kept exactly as written. When done, press Enter, then
+**Ctrl+D** (macOS / Linux) or **Ctrl+Z and Enter** (Windows):
+
+```bash
+python main.py --env cdp
+```
+
+Or keep the task in a text file:
+
+```bash
+python main.py --env cdp --query_file task.txt
+```
+
 ## Run with Docker
 
 A sandbox with the browser included, plus a live view at http://localhost:6080.

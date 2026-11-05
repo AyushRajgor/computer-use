@@ -49,7 +49,8 @@ Sources: [model versions](https://aistudio.google.com/docs/computer-use#model-ve
 
 | Flag | Env var | Default | Purpose |
 |-|-|-|-|
-| `--query` | | (required) | The task |
+| `--query` | | asked for | The task. Without `--query` / `--query_file` it is read from the terminal (type or paste, then Ctrl+D, or Ctrl+Z and Enter on Windows) or from a pipe |
+| `--query_file` | | | Read the task from a text file (UTF-8 or UTF-16, multi-line) |
 | `--env` | `COMPUTER_USE_ENV` | `playwright` | `playwright`, `cdp`, `browserbase`, `browser-use`, `desktop` ([browsers.md](browsers.md)) |
 | `--model` | `GEMINI_MODEL` | `gemini-3.8-flash` | See the table above |
 | `--initial_url` | `INITIAL_URL` | `https://www.google.com` | First page |
