@@ -21,7 +21,10 @@ The loop:
 
 ```
 main.py                 CLI
-agent.py                ComputerUseAgent: loop, action dispatch, safety, logging
+agent.py                ComputerUseAgent: loop, action dispatch, safety, telemetry
+telemetry.py            session ids and the runs/<session id>/ files (write + read)
+runs.py                 CLI to list and inspect sessions in the terminal
+report.py               a session as a page: report.html
 backends.py             Interactions API + generateContent backends
 models.py               model registry, action names, safety policies
 custom_functions.py     custom function support + yield_to_user

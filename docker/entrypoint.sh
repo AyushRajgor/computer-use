@@ -71,9 +71,9 @@ fi
 
 cd /app
 
-if [ -n "${RUN_LOG_DIR:-}" ] && ! { mkdir -p "${RUN_LOG_DIR}" 2>/dev/null && [ -w "${RUN_LOG_DIR}" ]; }; then
-  echo "Note: ${RUN_LOG_DIR} is not writable (mounted folder owned by another user); run logs are disabled." >&2
-  unset RUN_LOG_DIR
+if is_true "${RUN_LOGS:-true}" && ! { mkdir -p /app/runs 2>/dev/null && [ -w /app/runs ]; }; then
+  echo "Note: /app/runs is not writable (mounted folder owned by another user); session logs are off." >&2
+  export RUN_LOGS=false
 fi
 
 if [ "$#" -eq 0 ]; then set -- --help; fi

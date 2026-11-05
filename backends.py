@@ -57,6 +57,9 @@ class ToolResult:
     payload: dict[str, Any]
     screenshot: Optional[bytes] = None
     is_error: bool = False
+    duration_s: Optional[float] = None  # how long the action took (telemetry only)
+    started: Optional[float] = None  # when it started and ended, Unix time (telemetry only)
+    ended: Optional[float] = None
 
 
 @dataclasses.dataclass

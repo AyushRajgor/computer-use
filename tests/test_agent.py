@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import datetime
 import json
 import os
 from unittest.mock import MagicMock
@@ -416,16 +417,141 @@ class TestLoop:
         assert res.payload == {"answer": 42, "url": "https://start"}
         assert res.screenshot == b"png"
 
-    def test_run_log(self, tmp_path):
+
+# ---------------------------------------------------------------------------
+# telemetry and session logs
+# ---------------------------------------------------------------------------
+
+
+def read_steps(root, result):
+    lines = (root / result.session_id / "trajectory.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+class TestTelemetry:
+    def test_session_log(self, tmp_path):
         agent, backend, result = run_with(
-            [ModelTurn(calls=[call("take_screenshot")]), ModelTurn(text="done")],
+            [
+                ModelTurn(calls=[call("take_screenshot", intent="look")], usage={"total_tokens": 7}),
+                ModelTurn(text="done", usage={"total_tokens": 3}),
+            ],
             log_dir=str(tmp_path),
         )
-        run_dir = tmp_path / os.listdir(tmp_path)[0]
-        lines = (run_dir / "trajectory.jsonl").read_text().splitlines()
-        assert json.loads(lines[0])["calls"][0]["name"] == "take_screenshot"
-        assert (run_dir / "step_001_0_take_screenshot.png").read_bytes() == b"png"
-        assert json.loads((run_dir / "result.json").read_text())["status"] == "completed"
+        assert os.listdir(tmp_path) == [result.session_id]
+        run_dir = tmp_path / result.session_id
+        assert result.log_dir == str(run_dir)
+
+        run = json.loads((run_dir / "run.json").read_text())
+        assert run["session_id"] == result.session_id and run["query"] == "test query"
+        assert run["model"] and run["api"] == "interactions" and run["started_at"]
+
+        first, last = read_steps(tmp_path, result)
+        assert first["step"] == 1 and first["calls"][0]["name"] == "take_screenshot"
+        assert first["usage"] == {"total_tokens": 7}
+        assert first["model_s"] >= 0 and first["actions_s"] >= 0 and first["started_at"]
+        (res,) = first["results"]
+        assert res["duration_s"] >= 0 and not res["is_error"]
+        began, ended = (datetime.datetime.fromisoformat(res[k]) for k in ("started_at", "ended_at"))
+        assert began <= ended and began >= datetime.datetime.fromisoformat(first["started_at"])
+        assert (run_dir / res["screenshot"]).read_bytes() == b"png"
+        assert last["step"] == 2 and last["text"] == "done" and "stopped" not in last
+
+        saved = json.loads((run_dir / "result.json").read_text())
+        assert saved["status"] == "completed" and saved["session_id"] == result.session_id
+        assert saved["tool_calls"] == {"take_screenshot": 1} and saved["tool_errors"] == 0
+        assert saved["usage"] == {"total_tokens": 10}
+        assert saved["duration_s"] >= 0 and saved["ended_at"]
+
+    def test_numbers_are_returned_without_a_log(self):
+        computer = mock_computer()
+        computer.navigate.side_effect = PermissionError("blocked")
+        agent, backend, result = run_with(
+            [
+                ModelTurn(calls=[call("navigate", url="https://x"), call("wait", seconds=0)]),
+                ModelTurn(text="ok"),
+            ],
+            computer=computer,
+        )
+        assert result.log_dir is None and result.session_id
+        assert result.tool_calls == {"navigate": 1, "wait": 1} and result.tool_errors == 1
+        assert result.duration_s >= result.actions_s >= 0 and result.model_s >= 0
+        assert result.started_at and result.ended_at
+        assert result.retries == {"empty_response": 0, "network": 0}
+        assert all(r.duration_s is not None for r in backend.sent[0])
+
+    def test_error_turn_is_logged(self, tmp_path):
+        agent, backend, result = run_with(
+            [ModelTurn(calls=[call("wait", seconds=0)]), ModelTurn(error="Interaction failed")],
+            log_dir=str(tmp_path),
+        )
+        steps = read_steps(tmp_path, result)
+        assert [s["step"] for s in steps] == [1, 2]
+        assert steps[1]["stopped"] == "error" and steps[1]["error"] == "Interaction failed"
+
+    def test_max_steps_turn_is_logged_without_results(self, tmp_path):
+        turns = [ModelTurn(calls=[call("wait", seconds=0)]) for _ in range(3)]
+        agent, backend, result = run_with(turns, max_steps=1, log_dir=str(tmp_path))
+        steps = read_steps(tmp_path, result)
+        assert steps[-1]["stopped"] == "max_steps"
+        assert steps[-1]["calls"] and steps[-1]["results"] == []
+
+    def test_interrupted_step_keeps_the_finished_calls(self, tmp_path):
+        computer = mock_computer()
+        computer.click_at.side_effect = KeyboardInterrupt
+        agent, backend, result = run_with(
+            [ModelTurn(calls=[call("wait", seconds=0), call("click", x=1, y=1)])],
+            computer=computer,
+            log_dir=str(tmp_path),
+        )
+        assert result.status == "terminated"
+        (step,) = read_steps(tmp_path, result)
+        assert step["stopped"] == "terminated"
+        assert [r["name"] for r in step["results"]] == ["wait"]
+        assert result.tool_calls == {"wait": 1, "click": 1}
+        assert json.loads((tmp_path / result.session_id / "result.json").read_text())["status"] == "terminated"
+
+    def test_retries_are_counted_per_step(self, tmp_path):
+        agent = make_agent(log_dir=str(tmp_path))
+
+        class Flaky(ScriptedBackend):
+            def start(self, query, screenshot):
+                agent._on_retry(1, 0.0, TimeoutError("slow"))  # what call_with_retries reports
+                return super().start(query, screenshot)
+
+        agent._backend = Flaky(
+            [ModelTurn(retryable_empty=True, usage={"total_tokens": 3}), ModelTurn(text="ok", usage={"total_tokens": 5})]
+        )
+        result = agent.run()
+        assert result.usage == {"total_tokens": 8}
+        assert result.retries == {"empty_response": 1, "network": 1}
+        (step,) = read_steps(tmp_path, result)
+        assert step["usage"] == {"total_tokens": 8}
+        assert step["retries"]["empty_response"] == 1
+        assert step["retries"]["network"][0]["error"] == "TimeoutError: slow"
+
+    def test_unwritable_log_folder_does_not_stop_the_run(self, tmp_path, capsys):
+        not_a_folder = tmp_path / "file"
+        not_a_folder.write_text("x")
+        agent, backend, result = run_with([ModelTurn(text="ok")], log_dir=str(not_a_folder))
+        assert result.ok and result.log_dir is None
+        assert "session log turned off" in capsys.readouterr().err
+
+    def test_summary(self, tmp_path, capsys):
+        agent, backend, result = run_with(
+            [
+                ModelTurn(calls=[call("wait", seconds=0)], usage={"total_tokens": 1200, "total_input_tokens": 1000}),
+                ModelTurn(text="ok"),
+            ],
+            verbose=True,
+            log_dir=str(tmp_path),
+        )
+        out = capsys.readouterr().out
+        assert "waiting for Gemini" in out and "Tools: 1 call(s) (wait 1)" in out
+        assert "Tokens: 1,200 total (input 1,000)" in out
+        report = tmp_path / result.session_id / "report.html"
+        assert result.report_path == str(report) and report.is_file()
+        assert f"Report: {report.resolve().as_uri()}" in out
+        assert f"python runs.py {result.session_id}" in out
 
 
 def test_yield_to_user_without_tty(monkeypatch):
@@ -448,3 +574,14 @@ def test_full_loop_against_fake_interactions_api(fake_gemini):
     (fr,) = second["input"]
     assert fr["type"] == "function_result" and fr["call_id"] == "i1-call-0"
     assert result.usage["total_tokens"] == 20
+
+
+def test_session_log_records_interaction_ids(fake_gemini, tmp_path):
+    fake_gemini.responses = [
+        interaction(calls=[("click", {"x": 500, "y": 500})], id_="i1"),
+        interaction(text="All done", id_="i2"),
+    ]
+    result = make_agent(client=fake_gemini.client(), log_dir=str(tmp_path)).run()
+    steps = read_steps(tmp_path, result)
+    assert [s["response_id"] for s in steps] == ["i1", "i2"]
+    assert [s["usage"]["total_tokens"] for s in steps] == [10, 10]

@@ -25,6 +25,7 @@ import codecs
 import os
 import signal
 import sys
+import urllib.parse
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -47,6 +48,7 @@ from models import (  # noqa: E402
     SAFETY_POLICIES,
     THINKING_LEVELS,
 )
+from telemetry import RUNS_DIR  # noqa: E402
 
 PLAYWRIGHT_SCREEN_SIZE = (1440, 900)
 
@@ -195,7 +197,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env_int("MAX_RECENT_SCREENSHOTS", 3),
         help="Screenshots kept in client-side history (generate_content / --history client).",
     )
-    g.add_argument("--log_dir", default=_env("RUN_LOG_DIR"), help="Save a trajectory + screenshots here.")
+    run_logs = _env_bool("RUN_LOGS")
+    g.add_argument(
+        "--log",
+        action=argparse.BooleanOptionalAction,
+        default=True if run_logs is None else run_logs,
+        help="Save this session (steps, tool calls, timing, tokens, screenshots) to "
+        "runs/<session id>/. See sessions with: python runs.py",
+    )
     g.add_argument("--quiet", action="store_true", help="Only print the final result.")
 
     b = parser.add_argument_group("Browser")
@@ -312,6 +321,30 @@ def resolve_query(args: argparse.Namespace, stdin=None) -> str:
     return query
 
 
+def _without_credentials(url: Optional[str]) -> Optional[str]:
+    """Drops user:password and the query string (where tokens go) from a URL."""
+    if not url or "://" not in url:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6
+        host = f"[{host}]"
+    if parts.port:
+        host += f":{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def run_settings(args: argparse.Namespace) -> dict:
+    """The CLI settings recorded in a session's run.json (the task itself and
+    the system instruction are recorded by the agent)."""
+    settings = {
+        k: v for k, v in vars(args).items() if k not in ("query", "system_instruction")
+    }
+    for key in ("cdp_url", "proxy_server"):
+        settings[key] = _without_credentials(settings.get(key))
+    return settings
+
+
 def _system_instruction(args: argparse.Namespace) -> Optional[str]:
     if args.system_instruction_file:
         with open(args.system_instruction_file, encoding="utf-8") as f:
@@ -343,7 +376,8 @@ def run_gemini(args: argparse.Namespace) -> int:
             safety_mode=args.safety,
             max_steps=args.max_steps,
             max_recent_screenshots=args.max_screenshots,
-            log_dir=args.log_dir,
+            log_dir=str(RUNS_DIR) if args.log else None,
+            run_info=run_settings(args),
         )
         result = agent.agent_loop()
     if args.quiet:

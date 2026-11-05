@@ -55,16 +55,65 @@ LOOKUP_ORDER = CustomFunction(
 
 Pass it with `ComputerUseAgent(..., custom_functions=[LOOKUP_ORDER])`.
 
-## Run logs
+## Session logs
 
-`--log_dir runs` writes `runs/<timestamp>/`:
+Every run is a session, saved to `runs/<session id>/` in the project folder.
+This is on by default; `--no-log` (or `RUN_LOGS=false`) turns it off.
 
-* `trajectory.jsonl`: per step the model's text and intents, the function
-  calls, safety decisions, results and token usage
-* one PNG screenshot per action
-* `result.json`: final status and answer
+A session id is the start time plus a random suffix, e.g.
+`20261105-141500-a3f9c1`: it sorts by time, tells you when the run happened,
+and stays unique when two runs start in the same second.
 
-Token usage is also printed at the end of every run.
+| File | What's in it |
+|-|-|
+| `run.json` | Written at the start: the task, model, API, environment, every CLI setting, versions |
+| `trajectory.jsonl` | One line per step: start time, time waiting for Gemini (`model_s`), time running actions (`actions_s`), the model's text and thoughts, each tool call with its arguments, result, start and end time (`started_at`, `ended_at`), `duration_s` and error flag, tokens, and any retries |
+| `step_*.png` | The screenshot after each action |
+| `result.json` | Written at the end: status, answer or error, duration, time split, tokens, tool call counts, failures, retries |
+| `report.html` | Written at the end: the session as a page (see below) |
+
+The step that ends a run early (an error, `--max_steps`, a denied safety
+prompt, Ctrl+C) is logged too, marked with `"stopped"`. A session without a
+`result.json` was killed or is still running.
+
+The end of every run prints a summary with a link to the report. It is printed
+whether the run completed, failed, hit `--max_steps` or was stopped with Ctrl+C;
+most terminals open it with Ctrl+click:
+
+```
+Agent finished: completed after 7 step(s) in 1m 32s.
+Time: 58.2s waiting for Gemini, 21.4s running actions
+Tools: 12 call(s) (click 5, type 3, navigate 2, scroll 2), 1 failed
+Tokens: 48,210 total (input 46,900, output 410, thought 900)
+Report: file:///D:/projects/computer-use/runs/20261105-141500-a3f9c1/report.html
+Session: 20261105-141500-a3f9c1  (in the terminal: python runs.py 20261105-141500-a3f9c1)
+```
+
+The report shows how the run ended (the answer, or the error and the step it
+stopped at), the totals (time split between Gemini and actions, steps, actions,
+tokens), the task, a strip of every screenshot, and each step: the model's
+reasoning, each action in words with its arguments and result, and the
+screenshot after it. Click a screenshot to page through them full size with
+← and →. It follows your system's light or dark mode, works offline, and links
+the screenshots by name, so the session folder can be zipped and shared.
+
+In Docker, the summary prints `runs/<session id>/report.html` instead of a
+link, since a `file://` link would point inside the container: open it from
+the project folder.
+
+See sessions in the terminal with `runs.py`:
+
+```bash
+python runs.py                  # every session: status, steps, time, tokens, tools, task
+python runs.py 1                # one session step by step (1 = newest in the list)
+python runs.py latest --html    # rebuild that session's report.html and open it
+```
+
+A session can also be picked by its id, or enough of its start or end
+(`python runs.py a3f9c1`). `--html` makes a report for a session that has
+none, such as one whose process was killed.
+
+Logs contain screenshots of whatever the agent saw. `runs/` is ignored by git.
 
 ## APIs and conversation history
 
@@ -89,10 +138,17 @@ with PlaywrightComputer(screen_size=(1440, 900), initial_url="https://www.google
         thinking_level="low",
         custom_functions=[YIELD_TO_USER],
         safety_mode="ask",
+        log_dir="runs",    # save the session (the CLI does this by default)
     )
-    result = agent.run()   # AgentResult(status, final_text, steps, usage, log_dir, error)
+    result = agent.run()
     print(result.status, result.final_text)
+    print(result.session_id, result.duration_s, result.tool_calls, result.usage)
+    print(result.report_path)  # runs/<session id>/report.html
 ```
+
+`AgentResult` also has `model_s`, `actions_s`, `tool_errors`, `retries`,
+`started_at`, `ended_at`, `error` and `log_dir`. Without `log_dir` nothing is
+written, but the numbers are still returned.
 
 The other browsers are `CDPComputer`, `BrowserbaseComputer`,
 `BrowserUseComputer` and `DesktopComputer` (all in `computers`). `BrowserAgent`

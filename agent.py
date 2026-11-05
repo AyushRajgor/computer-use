@@ -23,10 +23,8 @@
 See https://aistudio.google.com/docs/computer-use
 """
 import dataclasses
-import datetime
-import json
 import os
-import pathlib
+import platform
 import sys
 import time
 from typing import Any, Callable, Literal, Optional, Sequence, Union
@@ -54,6 +52,17 @@ from models import (
     SAFETY_POLICIES,
     THINKING_LEVELS,
     get_model_info,
+)
+from report import report_link, write_report
+from telemetry import (
+    RESULT_FILE,
+    RUN_FILE,
+    SessionLog,
+    format_duration,
+    format_tokens,
+    load_session,
+    new_session_id,
+    timestamp,
 )
 
 console = Console()
@@ -118,12 +127,43 @@ class AgentResult:
     final_text: Optional[str]
     steps: int
     usage: dict[str, int]
-    log_dir: Optional[str] = None
+    log_dir: Optional[str] = None  # this session's folder, if it was logged
     error: Optional[str] = None
+    session_id: Optional[str] = None
+    started_at: Optional[str] = None  # ISO 8601 local time
+    ended_at: Optional[str] = None
+    duration_s: Optional[float] = None  # wall time of the whole run
+    model_s: float = 0.0  # waiting for Gemini, retries included
+    actions_s: float = 0.0  # running tool calls (not safety prompts)
+    tool_calls: dict[str, int] = dataclasses.field(default_factory=dict)  # name -> count
+    tool_errors: int = 0
+    retries: dict[str, int] = dataclasses.field(default_factory=dict)  # empty_response, network
+    report_path: Optional[str] = None  # the session's report.html, if it was written
 
     @property
     def ok(self) -> bool:
         return self.status == "completed"
+
+
+@dataclasses.dataclass
+class _Request:
+    """The model request(s) behind one turn, with retries folded in."""
+
+    started: float = dataclasses.field(default_factory=time.time)
+    seconds: float = 0.0
+    usage: dict[str, int] = dataclasses.field(default_factory=dict)
+    empty_retries: int = 0
+    network_retries: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+
+
+def _response_id(turn: ModelTurn) -> Optional[str]:
+    """The Interactions API interaction id / generateContent response id."""
+    raw = turn.raw
+    for key in ("id", "response_id"):
+        value = raw.get(key) if isinstance(raw, dict) else getattr(raw, key, None)
+        if isinstance(value, str):
+            return value
+    return None
 
 
 class _TerminateLoop(Exception):
@@ -158,9 +198,12 @@ class ComputerUseAgent:
         max_recent_screenshots: int = MAX_RECENT_TURN_WITH_SCREENSHOTS,
         send_initial_screenshot: bool = True,
         log_dir: Optional[str] = None,
+        run_info: Optional[dict[str, Any]] = None,
         client: Optional[genai.Client] = None,
         input_fn: Callable[[str], str] = input,
     ):
+        """`log_dir`: save this session to `<log_dir>/<session_id>/` (see
+        telemetry.py). `run_info`: extra settings recorded in its run.json."""
         self._browser_computer = browser_computer
         self._query = query
         self._model_name = model_name
@@ -175,8 +218,21 @@ class ComputerUseAgent:
             browser_computer, "environment", "browser"
         )
         self.final_reasoning: Optional[str] = None
-        self.usage: dict[str, int] = {}
         self._step = 0
+
+        # Telemetry, also returned in AgentResult.
+        self.session_id = new_session_id()
+        self.usage: dict[str, int] = {}
+        self._model_s = 0.0
+        self._actions_s = 0.0
+        self._tool_calls: dict[str, int] = {}
+        self._tool_errors = 0
+        self._retries = {"empty_response": 0, "network": 0}
+        self._request: Optional[_Request] = None  # the model request in flight
+        self._history_mode = history
+        self._run_info = dict(run_info or {})
+        self._log_root = log_dir
+        self._session_log: Optional[SessionLog] = None
 
         self._check_model(model_name)
         if thinking_level:
@@ -207,30 +263,31 @@ class ComputerUseAgent:
         )
         self._backend = self._make_backend(history)
 
-        self._log_dir: Optional[pathlib.Path] = None
-        if log_dir:
-            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            self._log_dir = pathlib.Path(log_dir) / stamp
-            self._log_dir.mkdir(parents=True, exist_ok=True)
-
     # ------------------------------------------------------------------
     # setup helpers
     # ------------------------------------------------------------------
 
     def _make_backend(self, history: str) -> ModelBackend:
-        on_retry = lambda attempt, delay, exc: termcolor.cprint(  # noqa: E731
-            f"Model request failed on attempt {attempt} ({exc}). Retrying in {delay:.0f}s...",
-            color="yellow",
-        )
         if self._api == "interactions":
             return InteractionsBackend(
-                self._client, self._backend_config, on_retry=on_retry, history=history
+                self._client, self._backend_config, on_retry=self._on_retry, history=history
             )
         if self._api == "generate_content":
             return GenerateContentBackend(
-                self._client, self._backend_config, on_retry=on_retry
+                self._client, self._backend_config, on_retry=self._on_retry
             )
         raise ValueError(f"Unknown api: {self._api}")
+
+    def _on_retry(self, attempt: int, delay: float, exc: BaseException) -> None:
+        termcolor.cprint(
+            f"Model request failed on attempt {attempt} ({exc}). Retrying in {delay:.0f}s...",
+            color="yellow",
+        )
+        self._retries["network"] += 1
+        if self._request is not None:
+            self._request.network_retries.append(
+                {"attempt": attempt, "delay_s": delay, "error": f"{type(exc).__name__}: {exc}"}
+            )
 
     @staticmethod
     def _check_model(model_name: str) -> None:
@@ -475,6 +532,20 @@ class ComputerUseAgent:
             if str(safety.get("decision", "")).lower() == "require_confirmation":
                 extra["safety_acknowledgement"] = True
 
+        began, start = time.time(), time.perf_counter()
+        try:
+            result = self._run_call(call, extra)
+        finally:
+            seconds = time.perf_counter() - start
+            self._actions_s += seconds
+            self._tool_calls[call.name] = self._tool_calls.get(call.name, 0) + 1
+        result.duration_s = round(seconds, 3)
+        result.started, result.ended = began, time.time()
+        if result.is_error:
+            self._tool_errors += 1
+        return result
+
+    def _run_call(self, call: ToolCall, extra: dict[str, Any]) -> ToolResult:
         try:
             if call.name in self._custom_functions:
                 # Custom functions may prompt the user (yield_to_user): no spinner.
@@ -540,39 +611,64 @@ class ComputerUseAgent:
         table.add_row(reasoning or "", "\n".join(call_strs))
         console.print(table)
 
-    def _log(self, turn: ModelTurn, results: Sequence[ToolResult]) -> None:
-        if not self._log_dir:
+    def _log_step(
+        self,
+        turn: ModelTurn,
+        request: Optional[_Request],
+        results: Sequence[ToolResult],
+        stopped: Optional[str] = None,
+    ) -> None:
+        """Appends one step to trajectory.jsonl. `stopped` marks the step that
+        ended the run early (error, max_steps, terminated)."""
+        log = self._session_log
+        if log is None or not log.enabled:
             return
+        request = request or _Request()
         record: dict[str, Any] = {
             "step": self._step,
-            "time": time.time(),
+            "time": time.time(),  # when the step finished (Unix time)
+            "started_at": timestamp(request.started),  # when its model request was sent
+            "model_s": round(request.seconds, 3),
+            "actions_s": round(sum(r.duration_s or 0.0 for r in results), 3),
+            "response_id": _response_id(turn),
             "text": turn.text,
             "thoughts": turn.thoughts,
             "status": turn.status,
+            "error": turn.error,
             "calls": [
                 {"id": c.id, "name": c.name, "args": c.args} for c in turn.calls
             ],
             "results": [],
-            "usage": turn.usage,
+            "usage": request.usage,
+            "retries": {
+                "empty_response": request.empty_retries,
+                "network": request.network_retries,
+            },
         }
+        if stopped:
+            record["stopped"] = stopped
         for i, r in enumerate(results):
             entry: dict[str, Any] = {
                 "call_id": r.call.id,
                 "name": r.call.name,
                 "payload": r.payload,
                 "is_error": r.is_error,
+                "duration_s": r.duration_s,
             }
+            if r.started is not None and r.ended is not None:
+                entry["started_at"] = timestamp(r.started)
+                entry["ended_at"] = timestamp(r.ended)
             if r.screenshot:
-                png = self._log_dir / f"step_{self._step:03d}_{i}_{r.call.name}.png"
-                png.write_bytes(r.screenshot)
-                entry["screenshot"] = png.name
+                name = log.write_bytes(f"step_{self._step:03d}_{i}_{r.call.name}.png", r.screenshot)
+                if name:
+                    entry["screenshot"] = name
             record["results"].append(entry)
-        with open(self._log_dir / "trajectory.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+        log.append_step(record)
 
-    def _accumulate_usage(self, turn: ModelTurn) -> None:
-        # Each request reports its own usage; sum them up over the run.
+    def _add_usage(self, request: _Request, turn: ModelTurn) -> None:
+        # Each request reports its own usage: add it to the step and the run.
         for key, value in turn.usage.items():
+            request.usage[key] = request.usage.get(key, 0) + value
             self.usage[key] = self.usage.get(key, 0) + value
 
     def _with_status(self, message: str, fn: Callable[[], Any]) -> Any:
@@ -581,75 +677,148 @@ class ComputerUseAgent:
                 return fn()
         return fn()
 
-    def _next_turn(self, fn: Callable[[], ModelTurn]) -> ModelTurn:
-        turn = self._with_status("Generating response from Gemini Computer Use...", fn)
-        empty_retries = 0
-        while turn.retryable_empty and empty_retries < MAX_EMPTY_RETRIES:
-            empty_retries += 1
-            self._accumulate_usage(turn)
-            turn = self._with_status(
-                "Empty/malformed response, retrying...", self._backend.retry
-            )
-        self._accumulate_usage(turn)
+    def _next_turn(self, fn: Callable[[], ModelTurn]) -> tuple[ModelTurn, _Request]:
+        request = self._request = _Request()
+        start = time.perf_counter()
+        try:
+            turn = self._with_status("Generating response from Gemini Computer Use...", fn)
+            self._add_usage(request, turn)
+            while turn.retryable_empty and request.empty_retries < MAX_EMPTY_RETRIES:
+                request.empty_retries += 1
+                turn = self._with_status(
+                    "Empty/malformed response, retrying...", self._backend.retry
+                )
+                self._add_usage(request, turn)
+        finally:
+            request.seconds = time.perf_counter() - start
+            self._model_s += request.seconds
+            self._retries["empty_response"] += request.empty_retries
+            self._request = None
         if turn.retryable_empty:
             turn.error = turn.error or (
-                f"The model returned {empty_retries + 1} empty or malformed responses in a row."
+                f"The model returned {request.empty_retries + 1} empty or malformed responses in a row."
             )
-        return turn
+        return turn, request
+
+    def _run_record(self, started: float) -> dict[str, Any]:
+        """run.json: what this session ran, written before the first step."""
+        cfg = self._backend_config
+        return {
+            "session_id": self.session_id,
+            "started_at": timestamp(started),
+            "query": self._query,
+            "model": self._model_name,
+            "api": self._api,
+            "history": self._history_mode,
+            "environment": self._environment,
+            "computer": type(self._browser_computer).__name__,
+            "thinking_level": cfg.thinking_level,
+            "media_resolution": cfg.media_resolution,
+            "prompt_injection_detection": cfg.enable_prompt_injection_detection,
+            "disabled_safety_policies": list(cfg.disabled_safety_policies),
+            "excluded_predefined_functions": list(cfg.excluded_predefined_functions),
+            "custom_functions": list(self._custom_functions),
+            "system_instruction": cfg.system_instruction,
+            "safety_mode": self._safety_mode,
+            "max_steps": self._max_steps,
+            "max_recent_screenshots": cfg.max_recent_screenshots,
+            "send_initial_screenshot": self._send_initial_screenshot,
+            "settings": self._run_info,
+            "versions": {
+                "python": platform.python_version(),
+                "google-genai": getattr(genai, "__version__", None),
+            },
+        }
 
     def run(self) -> AgentResult:
         """Runs the agent until completion and returns an `AgentResult`."""
+        started, clock = time.time(), time.perf_counter()
+        log = None
+        if self._log_root:
+            log = self._session_log = SessionLog(self._log_root, self.session_id)
+            self.session_id = log.session_id
+            log.write_json(RUN_FILE, self._run_record(started))
+
         live_url = self._browser_computer.live_view_url()
         if live_url and self._verbose:
             termcolor.cprint(f"Live view: {live_url}", color="green", attrs=["bold"])
 
         status: AgentStatus = "completed"
         error: Optional[str] = None
+        turn: Optional[ModelTurn] = None
+        request: Optional[_Request] = None
+        results: list[ToolResult] = []
+        logged = True  # whether `turn` is in the trajectory yet
         try:
             screenshot = None
             if self._send_initial_screenshot:
                 screenshot = self._browser_computer.current_state().screenshot
-            turn = self._next_turn(lambda: self._backend.start(self._query, screenshot))
+            turn, request = self._next_turn(lambda: self._backend.start(self._query, screenshot))
 
             while True:
                 self._step += 1
+                results, logged = [], False
                 if turn.error and not turn.calls:
                     raise _TerminateLoop("error", turn.error)
                 if not turn.calls:
                     self.final_reasoning = turn.text
                     self._display(turn)
-                    self._log(turn, [])
                     break
                 if self._max_steps and self._step > self._max_steps:
                     raise _TerminateLoop(
                         "max_steps", f"Stopped after {self._max_steps} steps (--max_steps)."
                     )
                 self._display(turn)
-                results = [self._execute(call) for call in turn.calls]
-                self._log(turn, results)
-                turn = self._next_turn(lambda: self._backend.send_results(results))
+                for call in turn.calls:  # a loop, so a stop keeps the finished calls
+                    results.append(self._execute(call))
+                self._log_step(turn, request, results)
+                logged = True
+                turn, request = self._next_turn(lambda: self._backend.send_results(results))
         except _TerminateLoop as t:
             status, error = t.status, t.message
         except KeyboardInterrupt:
             status, error = "terminated", "Interrupted by user."
         except Exception as e:  # noqa: BLE001
             status, error = "error", f"{type(e).__name__}: {e}"
+        if turn is not None and not logged:
+            # The last step: the final answer, or the step the run stopped in.
+            self._log_step(turn, request, results, stopped=None if status == "completed" else status)
 
         result = AgentResult(
             status=status,
             final_text=self.final_reasoning,
             steps=self._step,
             usage=dict(self.usage),
-            log_dir=str(self._log_dir) if self._log_dir else None,
+            log_dir=str(log.path) if log and log.path else None,
             error=error,
+            session_id=self.session_id,
+            started_at=timestamp(started),
+            ended_at=timestamp(),
+            duration_s=round(time.perf_counter() - clock, 3),
+            model_s=round(self._model_s, 3),
+            actions_s=round(self._actions_s, 3),
+            tool_calls=dict(self._tool_calls),
+            tool_errors=self._tool_errors,
+            retries=dict(self._retries),
         )
-        if self._log_dir:
-            (self._log_dir / "result.json").write_text(
-                json.dumps(dataclasses.asdict(result), indent=2, default=str)
-            )
+        if log and log.path:
+            result.report_path = self._write_report(log.path, result)
+        if log:
+            log.write_json(RESULT_FILE, dataclasses.asdict(result))
         if self._verbose:
             self._print_summary(result)
         return result
+
+    @staticmethod
+    def _write_report(folder: "os.PathLike[str] | str", result: AgentResult) -> Optional[str]:
+        """report.html: the session as a page (report.py). Like the rest of the
+        log, it must never stop a run: on any problem it warns and is skipped."""
+        try:
+            session = dataclasses.replace(load_session(folder), result=dataclasses.asdict(result))
+            return str(write_report(session))
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: could not write the session report: {e}", file=sys.stderr)
+            return None
 
     def agent_loop(self) -> AgentResult:
         """Backwards compatible alias of `run()`."""
@@ -659,7 +828,8 @@ class ComputerUseAgent:
     def _print_summary(result: AgentResult) -> None:
         color = "green" if result.ok else "red"
         termcolor.cprint(
-            f"\nAgent finished: {result.status} after {result.steps} step(s).",
+            f"\nAgent finished: {result.status} after {result.steps} step(s) "
+            f"in {format_duration(result.duration_s)}.",
             color=color,
             attrs=["bold"],
         )
@@ -667,13 +837,28 @@ class ComputerUseAgent:
             print(result.final_text)
         if result.error:
             termcolor.cprint(result.error, color=color)
-        if result.usage:
+        print(
+            f"Time: {format_duration(result.model_s)} waiting for Gemini, "
+            f"{format_duration(result.actions_s)} running actions"
+        )
+        if result.tool_calls:
+            counts = sorted(result.tool_calls.items(), key=lambda kv: -kv[1])
+            failed = f", {result.tool_errors} failed" if result.tool_errors else ""
             print(
-                "Tokens: "
-                + ", ".join(f"{k.replace('total_', '')}={v}" for k, v in result.usage.items())
+                f"Tools: {sum(result.tool_calls.values())} call(s) ("
+                + ", ".join(f"{name} {n}" for name, n in counts)
+                + f"){failed}"
             )
+        retries = [f"{n} {kind.replace('_', ' ')}" for kind, n in result.retries.items() if n]
+        if retries:
+            print("Retries: " + ", ".join(retries))
+        if result.usage:
+            print(f"Tokens: {format_tokens(result.usage)}")
+        if result.report_path:
+            sys.stdout.flush()  # termcolor/print above, rich below: keep the order
+            console.print(report_link(result.report_path), soft_wrap=True, highlight=False)
         if result.log_dir:
-            print(f"Run log: {result.log_dir}")
+            print(f"Session: {result.session_id}  (in the terminal: python runs.py {result.session_id})")
 
 
 # Backwards compatible name.

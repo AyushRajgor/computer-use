@@ -127,7 +127,7 @@ def _isolate_env(monkeypatch):
             "CDP_URL",
             "MAX_STEPS",
             "SAFETY_CONFIRMATION",
-            "RUN_LOG_DIR",
+            "RUN_LOGS",
             "LIVE_VIEW_URL",
         ):
             monkeypatch.delenv(key, raising=False)

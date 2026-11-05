@@ -90,7 +90,7 @@ Sources: [model versions](https://aistudio.google.com/docs/computer-use#model-ve
 
 | Flag | Env var | Default | Purpose |
 |-|-|-|-|
-| `--log_dir` | `RUN_LOG_DIR` | off | Save a trajectory and screenshots per run ([features.md](features.md#run-logs)) |
+| `--log` / `--no-log` | `RUN_LOGS` | on | Save each session (steps, tool calls, timing, tokens, screenshots, a report page) to `runs/`; see them with `python runs.py` ([features.md](features.md#session-logs)) |
 | `--quiet` | | off | Print only the final answer |
 
 Cloud browser settings (`BROWSERBASE_*`, `BROWSER_USE_*`) are listed in

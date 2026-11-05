@@ -44,8 +44,11 @@ docker compose exec desktop python main.py --env desktop --query "..."
 * **Confirmations** are asked in your terminal (`-it` is on by default). For
   unattended runs pass `-e SAFETY_CONFIRMATION=deny` (or `auto-confirm`, only in
   a sandbox you trust).
-* **Run logs** (trajectory + screenshots) go to `./runs`; set `RUN_LOG_DIR=` to
-  turn them off.
+* **Session logs** go to `./runs` on your computer. Each run ends by printing
+  where its report is (`runs/<session id>/report.html`, in the project folder:
+  open it from there). List sessions with
+  `docker compose run --rm agent python runs.py` (or `python runs.py` outside
+  Docker). Set `RUN_LOGS=false` to turn them off.
 * **Stopping**: Ctrl+C or `docker stop` release Browserbase sessions and stop
   Browser Use browsers before the container exits.
 * **Ports** are bound to `127.0.0.1` only.
@@ -66,4 +69,4 @@ docker compose exec desktop python main.py --env desktop --query "..."
 | `VNC_VIEW_ONLY` | `false` | Watch only, no mouse/keyboard from the live view |
 | `KEEP_DISPLAY_OPEN` | `false` | Keep the live view up after the agent finishes |
 | `DESKTOP_STARTUP_APPS` | `xterm` for `desktop` | Apps to open at start, e.g. `xterm,chromium` |
-| `RUN_LOG_DIR` | `/app/runs` | Where run logs are written (empty = off) |
+| `RUN_LOGS` | `true` | Save each session to `./runs` (`false` = off) |

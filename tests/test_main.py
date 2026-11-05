@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import io
+import json
+import pathlib
 from unittest.mock import patch
 
 import pytest
@@ -187,6 +189,45 @@ class TestQuery:
             assert main.main(["--query_file", "no-such-task.txt"]) == 2
         computer.assert_not_called()
         assert "no-such-task.txt" in capsys.readouterr().err
+
+
+class TestSessionLogFlag:
+    @patch("main.PlaywrightComputer")
+    @patch("main.ComputerUseAgent")
+    def test_on_by_default_in_the_project_runs_folder(self, mock_agent, mock_computer):
+        mock_agent.return_value.agent_loop.return_value = ok_result()
+        main.main(["--query", "q"])
+        kwargs = mock_agent.call_args.kwargs
+        assert kwargs["log_dir"] == str(pathlib.Path(main.__file__).resolve().parent / "runs")
+        assert kwargs["run_info"]["env"] == "playwright" and kwargs["run_info"]["log"] is True
+
+    @patch("main.PlaywrightComputer")
+    @patch("main.ComputerUseAgent")
+    def test_no_log(self, mock_agent, mock_computer):
+        mock_agent.return_value.agent_loop.return_value = ok_result()
+        main.main(["--query", "q", "--no-log"])
+        assert mock_agent.call_args.kwargs["log_dir"] is None
+
+    def test_env_var(self, monkeypatch):
+        assert parse().log is True
+        monkeypatch.setenv("RUN_LOGS", "false")
+        assert parse().log is False
+        assert parse("--log").log is True
+        monkeypatch.setenv("RUN_LOGS", "true")
+        assert parse().log is True
+
+    def test_settings_leave_out_credentials(self):
+        args = parse(
+            "--env", "cdp",
+            "--cdp_url", "wss://user:secret@cdp.example.com:9222/devtools/browser?apiKey=abc",
+            "--proxy_server", "http://bob:pw@proxy.local:8080",
+        )
+        settings = main.run_settings(args)
+        assert settings["cdp_url"] == "wss://cdp.example.com:9222/devtools/browser"
+        assert settings["proxy_server"] == "http://proxy.local:8080"
+        assert "query" not in settings and settings["env"] == "cdp"
+        assert main.run_settings(parse("--cdp_url", "chrome"))["cdp_url"] == "chrome"
+        json.dumps(settings)  # goes into run.json
 
 
 class TestMain:

@@ -125,7 +125,13 @@ Add `--env browserbase` or `--env browser-use` for the cloud browsers. More in
 | `--max_steps 50` | Stop after 50 steps (default 100) |
 | `--allowed_domains example.com` | Only let the agent visit these sites |
 | `--hitl` | Let the agent ask you for input, e.g. a 2FA code |
-| `--log_dir runs` | Save every step and screenshot |
+| `--no-log` | Don't save this session |
+
+Every run is saved as a session in `runs/` (steps, tool calls, timing, tokens,
+screenshots). When a run ends, completed or not, it prints a link to the
+session's report: a page with the answer or error, every step and its
+screenshot. List sessions with `python runs.py`. More in
+[docs/features.md](docs/features.md#session-logs).
 
 To skip typing `--env` every time, set `COMPUTER_USE_ENV` in `.env`. All
 options: `python main.py --help` or [docs/configuration.md](docs/configuration.md).
