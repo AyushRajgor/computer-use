@@ -8,7 +8,7 @@ desktop, feeds back new screenshots, and loops until the task is done.
 | Where the agent acts | `--env` | Runs on |
 |-|-|-|
 | Local Chromium / Chrome / Edge (Playwright) | `playwright` (default) | your machine or Docker |
-| Any browser exposing CDP (your own Chrome, a self-hosted browser container, ...) | `cdp` | wherever that browser runs |
+| The Chrome you are using right now (your profile and logins), or any browser exposing CDP | `cdp` | wherever that browser runs |
 | [Browserbase](https://www.browserbase.com) cloud browser | `browserbase` | Browserbase cloud |
 | [Browser Use](https://browser-use.com) cloud browser | `browser-use` | Browser Use cloud |
 | Linux desktop (X11, `environment="desktop"`) | `desktop` | Docker (recommended) or any X11 Linux |
@@ -90,8 +90,27 @@ python main.py --query "..." --user_data_dir ~/.cu-profile  # keep cookies / log
 
 ### Your own browser over CDP (`--env cdp`)
 
-Attach to any Chromium-based browser that exposes the DevTools protocol, e.g.
-your regular Chrome (start it with a separate profile):
+**The Chrome you are using right now**, with your normal profile and logins
+(Chrome 144+):
+
+1. Open `chrome://inspect/#remote-debugging` and check *Allow remote debugging
+   for this browser instance*.
+2. Run the agent; Chrome asks you to allow the connection.
+
+```bash
+python main.py --env cdp --query "..."                      # --cdp_url defaults to "chrome"
+python main.py --env cdp --cdp_url msedge --query "..."     # also chrome-beta, chrome-canary, msedge-beta, ...
+```
+
+The agent opens its own tab, keeps it in front while it works and leaves it
+open afterwards; tabs you open meanwhile are left alone (use another window to
+keep browsing). It acts with everything your profile is signed in to, and
+`ALLOWED_DOMAINS` / `BLOCKED_DOMAINS` apply to the whole browser while it is
+connected.
+
+**Any other browser that exposes the DevTools protocol**, e.g. a Chrome started
+with a separate profile (Chrome ignores `--remote-debugging-port` on the
+default profile):
 
 ```bash
 google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cu-chrome
@@ -343,7 +362,7 @@ default (see `.env.example`).
 | `--browser_channel` | `PLAYWRIGHT_CHANNEL` | `chromium` |
 | `--user_data_dir` | `BROWSER_USER_DATA_DIR` | temporary profile |
 | `--proxy_server` | `BROWSER_PROXY_SERVER` | none |
-| `--cdp_url` | `CDP_URL` | |
+| `--cdp_url` | `CDP_URL` | `chrome` (your running Chrome) |
 | `--allowed_domains` / `--blocked_domains` | `ALLOWED_DOMAINS` / `BLOCKED_DOMAINS` | none |
 | `--tab_mode` | `TAB_MODE` | `single` (`follow` switches to new tabs/popups) |
 | `--highlight_mouse` | | off |

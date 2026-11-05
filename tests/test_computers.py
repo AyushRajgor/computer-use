@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import time
+import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +26,7 @@ import pytest
 from computers import (
     BrowserbaseComputer,
     BrowserUseComputer,
+    CDPComputer,
     DesktopComputer,
     PlaywrightComputer,
 )
@@ -178,6 +182,54 @@ class TestBrowserUseParams:
         client.browsers.stop.assert_called_once_with("b1")
 
 
+def _fake_cdp_browser(computer):
+    """Wires a mocked Playwright into `computer`; returns (browser, existing tab, new tab)."""
+    computer._playwright = MagicMock()
+    browser = computer._playwright.chromium.connect_over_cdp.return_value
+    context = MagicMock()
+    existing, new_tab = MagicMock(), MagicMock()
+    existing.evaluate.return_value = new_tab.evaluate.return_value = "Windows"
+    context.pages = [existing]
+    context.new_page.return_value = new_tab
+    browser.contexts = [context]
+    return browser, existing, new_tab
+
+
+class TestCDP:
+    def test_default_target_is_running_chrome(self):
+        assert CDPComputer()._cdp_endpoint() == "chrome"
+        assert CDPComputer("http://x:9222")._cdp_endpoint() == "http://x:9222"
+
+    def test_running_browser_gets_its_own_tab(self):
+        computer = CDPComputer("msedge")
+        browser, existing, new_tab = _fake_cdp_browser(computer)
+        computer._connect()
+        assert computer._page is new_tab
+        existing.set_viewport_size.assert_not_called()
+        computer._disconnect()
+        new_tab.close.assert_not_called()  # left open so the result stays visible
+        browser.close.assert_called_once()  # disconnects; does not kill the browser
+
+    def test_url_target_takes_over_first_tab(self):
+        computer = CDPComputer("http://x:9222")
+        _, existing, new_tab = _fake_cdp_browser(computer)
+        computer._connect()
+        assert computer._page is existing
+        assert not computer._own_tab
+
+    def test_ignores_tabs_the_agent_did_not_open(self):
+        computer = CDPComputer("chrome")
+        agent_tab, user_tab, popup = MagicMock(), MagicMock(), MagicMock()
+        computer._page = agent_tab
+        user_tab.opener.return_value = None
+        popup.opener.return_value = agent_tab
+        computer._own_tab = True
+        assert computer._opened_by_agent(popup)
+        assert not computer._opened_by_agent(user_tab)
+        computer._own_tab = False
+        assert computer._opened_by_agent(user_tab)
+
+
 def test_desktop_key_mapping():
     assert DesktopComputer._keysym("Enter") == "Return"
     assert DesktopComputer._keysym("control") == "ctrl"
@@ -271,6 +323,75 @@ def test_domain_policy_with_new_tab_and_redirect(fake_gemini):
             computer.navigate("file:///etc/hostname")
     finally:
         computer.__exit__(None, None, None)
+
+
+def _chromium_executable():
+    if CHROMIUM:
+        return CHROMIUM
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+        return path if os.path.exists(path) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _page_targets(endpoint: str) -> list[dict]:
+    with urllib.request.urlopen(endpoint + "/json/list", timeout=5) as r:
+        return [t for t in json.load(r) if t["type"] == "page"]
+
+
+@pytest.mark.integration
+def test_cdp_own_tab_leaves_user_tabs_alone(fake_gemini, tmp_path):
+    """Attached to somebody's browser: own tab, user tabs untouched, tab kept on exit."""
+    executable = _chromium_executable()
+    if not executable:
+        pytest.skip("Chromium not available")
+    fake_gemini.pages["/"] = TEST_PAGE
+    fake_gemini.pages["/two"] = b"<html><body>two</body></html>"
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}"
+    chrome = subprocess.Popen(
+        [executable, "--headless=new", f"--remote-debugging-port={port}",
+         f"--user-data-dir={tmp_path / 'profile'}", "--no-first-run",
+         "--no-default-browser-check", "about:blank"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            try:
+                if _page_targets(endpoint):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.1)
+        computer = CDPComputer(
+            endpoint,
+            own_tab=True,
+            screen_size=(1000, 700),
+            initial_url=fake_gemini.url + "/",
+            settle_time_s=0.1,
+        )
+        with computer as c:
+            user_tab = next(p for p in c._context.pages if p is not c._page)
+            assert user_tab.url == "about:blank"
+            # The user opens a tab while the agent works: not adopted, not closed.
+            mine = c._context.new_page()
+            mine.goto(fake_gemini.url + "/two")
+            assert c.current_state().url == fake_gemini.url + "/"
+            assert not mine.is_closed()
+            # The agent's own target=_blank link still opens in its tab.
+            assert c.click_at(150, 315).url == fake_gemini.url + "/two"
+            assert len(c._context.pages) == 3
+        # Disconnected: the browser and all three tabs (agent's included) remain.
+        assert len(_page_targets(endpoint)) == 3
+    finally:
+        chrome.kill()
+        chrome.wait(timeout=10)
 
 
 @pytest.mark.integration

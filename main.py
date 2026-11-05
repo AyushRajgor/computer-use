@@ -199,7 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--browser_channel", default=_env("PLAYWRIGHT_CHANNEL"), help="chromium, chrome, msedge ...")
     b.add_argument("--user_data_dir", default=_env("BROWSER_USER_DATA_DIR"), help="Persistent browser profile.")
     b.add_argument("--proxy_server", default=_env("BROWSER_PROXY_SERVER"), help="Local browser proxy.")
-    b.add_argument("--cdp_url", default=_env("CDP_URL"), help="CDP URL for --env cdp.")
+    b.add_argument(
+        "--cdp_url",
+        default=_env("CDP_URL"),
+        help="For --env cdp: a CDP URL, or the name of your running browser (chrome, "
+        "msedge, ...; needs chrome://inspect/#remote-debugging). Default: chrome.",
+    )
     b.add_argument("--allowed_domains", default=_env("ALLOWED_DOMAINS"), help="Comma separated allowlist.")
     b.add_argument("--blocked_domains", default=_env("BLOCKED_DOMAINS"), help="Comma separated blocklist.")
     b.add_argument(

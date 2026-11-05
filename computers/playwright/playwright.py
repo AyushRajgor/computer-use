@@ -305,6 +305,10 @@ class PlaywrightComputer(Computer):
     # tabs & navigation policy
     # ------------------------------------------------------------------
 
+    def _opened_by_agent(self, new_page: playwright.sync_api.Page) -> bool:
+        """Whether a new tab belongs to the agent. Overridden for shared browsers."""
+        return True
+
     def _handle_new_page(self, new_page: playwright.sync_api.Page):
         # Event handlers must not block; the page is processed after the action.
         self._pending_pages.append(new_page)
@@ -319,7 +323,7 @@ class PlaywrightComputer(Computer):
         """
         while self._pending_pages:
             new_page = self._pending_pages.pop(0)
-            if new_page.is_closed():
+            if new_page.is_closed() or not self._opened_by_agent(new_page):
                 continue
             if self._tab_mode == "follow":
                 self._page_stack.append(self._page)
