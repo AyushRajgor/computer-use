@@ -122,7 +122,6 @@ def _isolate_env(monkeypatch):
         if key.startswith(("BROWSERBASE_", "BROWSER_USE_", "GEMINI_", "GOOGLE_GENAI_")) or key in (
             "USE_VERTEXAI",
             "COMPUTER_USE_ENV",
-            "COMPUTER_USE_ENGINE",
             "SCREEN_SIZE",
             "PLAYWRIGHT_HEADLESS",
             "CDP_URL",

@@ -30,7 +30,8 @@ What's new compared to the original `computer-use-preview` code:
   http://localhost:6080.
 * Domain **allowlist / blocklist**, run **logs with screenshots**, sane exit codes,
   every flag configurable through environment variables.
-* Optional alternative engine: the open-source **browser-use** agent driven by Gemini.
+* **One decision-maker: Gemini.** Browserbase, Browser Use Cloud and local browsers
+  only supply the browser; their own agent frameworks are deliberately not used.
 
 > [!CAUTION]
 > Computer Use may contain errors and security vulnerabilities. Supervise it
@@ -156,8 +157,9 @@ bills until a browser is stopped or times out). Options:
 | `BROWSER_USE_ENABLE_RECORDING` | Record the session; the recording URL is printed after the run |
 | `BROWSER_USE_EXTENSION_IDS`, `BROWSER_USE_ALLOW_RESIZING` | Extensions (max 3), window resizing |
 
-The open-source `browser-use` library is an agent framework rather than a
-browser; it is available as an optional engine (see below).
+Only the Browser Use *cloud browser* is used. The open-source `browser-use`
+library is an agent framework (its own decision loop), so it is not part of
+this repository -- Gemini makes every decision.
 
 ### Linux desktop (`--env desktop`)
 
@@ -209,7 +211,6 @@ docker compose exec desktop python main.py --env desktop --query "..."
 * Host ports: `LIVE_VIEW_PORT` (default 6080) and `DESKTOP_LIVE_VIEW_PORT` (6081).
 * `docker stop` / Ctrl+C release Browserbase sessions and stop Browser Use
   browsers before the container exits.
-* Include the optional browser-use engine: `WITH_BROWSER_USE=true docker compose build`.
 * Different base image / registry mirror (e.g. Docker Hub rate limits):
   `docker build --build-arg BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm .`
 * Plain Docker: `docker build -t gemini-computer-use . && docker run --rm -it -p 127.0.0.1:6080:6080 --env-file .env gemini-computer-use --query "..."`
@@ -303,25 +304,13 @@ action and `result.json`. Token usage is printed at the end of every run.
 
 ---
 
-## Optional engine: browser-use (driven by Gemini)
+## Design: Gemini decides, providers supply browsers
 
-The default engine is Gemini Computer Use (screenshots + coordinates). As an
-alternative you can run a task with the open-source
-[browser-use](https://docs.browser-use.com) agent, which mainly works from the
-page's DOM (numbered elements) and uses screenshots as extra context. Gemini
-still makes every decision.
-
-```bash
-./scripts/install_engines.sh      # browser-use pins an old google-genai; this applies overrides
-python main.py --engine browser-use --query "..."                       # local Chrome
-python main.py --engine browser-use --env browser-use --query "..."     # Browser Use Cloud browser
-python main.py --engine browser-use --env browserbase --query "..."     # Browserbase browser
-python main.py --engine browser-use --env cdp --cdp_url http://localhost:9222 --query "..."
-```
-
-> **Stagehand** (Browserbase's open-source framework) is not included as an
-> engine: Stagehand 4.x removed its `agent()` API (only `act` / `observe` /
-> `extract` remain), and the 3.x line with an agent is superseded.
+Gemini Computer Use is the only decision-maker: it reads the screenshots and
+returns every action with coordinates. The browser providers are just places
+for those actions to run. Agent frameworks that bring their own decision loop
+-- the open-source `browser-use` library and Browserbase's Stagehand -- are
+therefore intentionally not included.
 
 ---
 
@@ -334,7 +323,6 @@ default (see `.env.example`).
 |-|-|-|
 | `--query` | | (required) |
 | `--env` | `COMPUTER_USE_ENV` | `playwright` |
-| `--engine` | `COMPUTER_USE_ENGINE` | `gemini` |
 | `--model` | `GEMINI_MODEL` | `gemini-3.8-flash` |
 | `--initial_url` | `INITIAL_URL` | `https://www.google.com` |
 | `--api` | `GEMINI_API` | `interactions` |
@@ -400,7 +388,6 @@ computers/
   browserbase/          Browserbase cloud browser
   browser_use/          Browser Use Cloud browser
   desktop/              X11 desktop (xdotool + mss)
-engines/                optional: browser-use engine
 docker/                 entrypoint, desktop launcher, window manager menu
 Dockerfile, docker-compose.yml
 tests/                  unit tests + integration tests (real Chromium / Xvfb, skipped if missing)

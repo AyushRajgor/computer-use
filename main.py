@@ -49,7 +49,6 @@ PLAYWRIGHT_SCREEN_SIZE = (1440, 900)
 
 ENVIRONMENTS = ("playwright", "cdp", "browserbase", "browser-use", "desktop")
 ENV_ALIASES = {"browseruse": "browser-use", "browser_use": "browser-use", "local": "playwright"}
-ENGINES = ("gemini", "browser-use")
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -92,13 +91,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=_env("COMPUTER_USE_ENV", "playwright"),
         help=f"Where the agent acts: {', '.join(ENVIRONMENTS)}.",
-    )
-    parser.add_argument(
-        "--engine",
-        choices=ENGINES,
-        default=_env("COMPUTER_USE_ENGINE", "gemini"),
-        help="'gemini' = Gemini Computer Use (default). 'browser-use' = the optional "
-        "open-source browser-use agent driven by Gemini.",
     )
     parser.add_argument(
         "--model",
@@ -301,47 +293,6 @@ def run_gemini(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
-def run_browser_use_engine(args: argparse.Namespace) -> int:
-    from engines.browser_use_engine import run_browser_use
-
-    env = ENV_ALIASES.get(args.env, args.env)
-    if env == "desktop":
-        raise SystemExit("The browser-use engine only supports browser environments.")
-    provider = None
-    cdp_url = args.cdp_url if env == "cdp" else None
-    if env in ("browserbase", "browser-use"):
-        provider = build_computer(args)
-        cdp_url = provider.start_session()
-        live = provider.live_view_url()
-        if live:
-            print(f"Live view: {live}")
-    try:
-        result = run_browser_use(
-            args.query,
-            model=args.model,
-            cdp_url=cdp_url,
-            headless=args.headless,
-            screen_size=args.screen_size,
-            max_steps=args.max_steps,
-            initial_url=args.initial_url,
-            user_data_dir=args.user_data_dir,
-            browser_channel=args.browser_channel,
-            allowed_domains=_csv(args.allowed_domains),
-            blocked_domains=_csv(args.blocked_domains),
-            thinking_level=args.thinking_level,
-            flash_mode=False,
-        )
-    finally:
-        if provider is not None:
-            provider.stop_session()
-    print(f"\nAgent finished: {result.status} after {result.steps} step(s).")
-    if result.final_text:
-        print(result.final_text)
-    if result.error:
-        print(result.error)
-    return 0 if result.ok else 1
-
-
 def _install_sigterm_handler() -> None:
     """Treat SIGTERM (docker stop, CI cancel, timeout) like Ctrl+C so cloud
     browser sessions are released / stopped instead of left running (billed)."""
@@ -362,8 +313,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.env not in ENVIRONMENTS:
         raise SystemExit(f"Unknown --env {args.env!r}. Choose one of {', '.join(ENVIRONMENTS)}.")
     try:
-        if args.engine == "browser-use":
-            return run_browser_use_engine(args)
         return run_gemini(args)
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)

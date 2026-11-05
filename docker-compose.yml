@@ -16,8 +16,6 @@ x-computer-use: &computer-use
   image: gemini-computer-use:latest
   build:
     context: .
-    args:
-      WITH_BROWSER_USE: ${WITH_BROWSER_USE:-false}
   env_file:
     - path: .env
       required: false

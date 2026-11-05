@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -32,7 +32,6 @@ class TestParser:
     def test_defaults(self):
         args = parse()
         assert args.env == "playwright"
-        assert args.engine == "gemini"
         assert args.model == DEFAULT_MODEL == "gemini-3.8-flash"
         assert args.api == "interactions"
         assert args.history == "server"
@@ -175,15 +174,3 @@ class TestMain:
     def test_unknown_env(self):
         with pytest.raises(SystemExit):
             main.main(["--query", "q", "--env", "mars"])
-
-    def test_browser_use_engine_with_cloud_browser(self):
-        provider = MagicMock()
-        provider.start_session.return_value = "wss://cdp"
-        provider.live_view_url.return_value = None
-        with patch("main.BrowserUseComputer", return_value=provider), patch(
-            "engines.browser_use_engine.run_browser_use", return_value=ok_result()
-        ) as run:
-            code = main.main(["--query", "q", "--engine", "browser-use", "--env", "browser-use"])
-        assert code == 0
-        assert run.call_args.kwargs["cdp_url"] == "wss://cdp"
-        provider.stop_session.assert_called_once()

@@ -11,8 +11,6 @@
 ARG BASE_IMAGE=python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
-ARG WITH_BROWSER_USE=false
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -31,14 +29,10 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt requirements-engines.txt ./
+COPY requirements.txt ./
 RUN pip install -r requirements.txt \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
-
-# Optional: the open-source browser-use engine (needs dependency overrides).
-COPY scripts/install_engines.sh scripts/
-RUN if [ "$WITH_BROWSER_USE" = "true" ]; then sh scripts/install_engines.sh; fi
 
 COPY . .
 
