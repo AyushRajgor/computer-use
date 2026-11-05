@@ -3,8 +3,9 @@
 Settings come from command-line flags; most flags also read a default from an
 environment variable, so you can put them in `.env`. Flags always win.
 
-`.env.example` only lists what a new user needs (the API keys and the default
-browser). Everything else is documented here and in [browsers.md](browsers.md).
+`.env.example` lists the API keys, the default browser, the Google Cloud
+alternative and a few commonly changed settings. Everything else is documented
+here and in [browsers.md](browsers.md).
 
 ## Gemini credentials
 
