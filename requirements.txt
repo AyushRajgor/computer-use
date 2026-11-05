@@ -1,8 +1,17 @@
-termcolor==3.1.0
-pydantic==2.12.0
-google-genai>=2.7.0
-playwright==1.55.0
-browserbase==1.4.0
-rich
-pytest
-python-dotenv==1.0.1
+# Core
+google-genai>=2.34.0,<3
+playwright==1.64.1
+pydantic>=2.12,<3
+python-dotenv>=1.0.1
+rich>=14
+termcolor>=3.1
+
+# Cloud browsers
+browserbase>=1.24.0,<2
+browser-use-sdk>=3.12.1,<4
+
+# Desktop environment (X11 screenshots)
+mss>=10.2,<11
+
+# Tests
+pytest>=8

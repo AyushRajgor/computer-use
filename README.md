@@ -1,184 +1,155 @@
-# Computer Use Preview
+# Gemini Computer Use
 
-## Quick Start
+Let Gemini use a web browser for you. Gemini looks at the screen and decides
+every click, keystroke and scroll; this project carries out those actions and
+repeats until the task is done. You choose where the browser runs: a fresh
+local Chromium, **your everyday Chrome**, or a cloud browser from
+**Browserbase** or **Browser Use**.
 
-This section will guide you through setting up and running Gemini Computer Use, using either the Gemini Developer API or Vertex AI. Follow these steps to get started.
+## 1. Requirements
 
-### 1. Installation
+* Python 3.11 or newer (or Docker, see [below](#run-with-docker))
+* A Gemini API key -- free at [Google AI Studio](https://aistudio.google.com/apikey)
 
-**Clone the Repository**
-
-```bash
-git clone https://github.com/google-gemini/computer-use-preview.git
-cd computer-use-preview
-```
-
-**Set up Python Virtual Environment and Install Dependencies**
+## 2. Install
 
 ```bash
+git clone https://github.com/AyushRajgor/computer-use.git
+cd computer-use
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+playwright install chromium        # only needed for option A below
 ```
 
-**Install Playwright and Browser Dependencies**
+## 3. Add your keys
 
 ```bash
-# Install system dependencies required by Playwright for Chrome
-playwright install-deps chrome
-
-# Install the Chrome browser for Playwright
-playwright install chrome
+cp .env.example .env               # Windows: copy .env.example .env
 ```
 
-### 2. Configuration
-You can get started using either the Gemini Developer API or Vertex AI.
+Open `.env` and fill in the keys for the browser you want to use:
 
-#### A. If using the Gemini Developer API:
-
-You need a Gemini API key to use the agent:
-
-```bash
-export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-```
-
-Or to add this to your virtual environment:
-
-```bash
-echo 'export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"' >> .venv/bin/activate
-# After editing, you'll need to deactivate and reactivate your virtual
-# environment if it's already active:
-deactivate
-source .venv/bin/activate
-```
-
-Replace `YOUR_GEMINI_API_KEY` with your actual key.
-
-#### B. If using the Vertex AI Client:
-
-You need to explicitly use Vertex AI, then provide project and location to use the agent:
-
-```bash
-export USE_VERTEXAI=true
-export VERTEXAI_PROJECT="YOUR_PROJECT_ID"
-export VERTEXAI_LOCATION="YOUR_LOCATION"
-```
-
-Or to add this to your virtual environment:
-
-```bash
-echo 'export USE_VERTEXAI=true' >> .venv/bin/activate
-echo 'export VERTEXAI_PROJECT="your-project-id"' >> .venv/bin/activate
-echo 'export VERTEXAI_LOCATION="your-location"' >> .venv/bin/activate
-# After editing, you'll need to deactivate and reactivate your virtual
-# environment if it's already active:
-deactivate
-source .venv/bin/activate
-```
-
-Replace `YOUR_PROJECT_ID` and `YOUR_LOCATION` with your actual project and location.
-
-#### C. Using a `.env` file (Recommended for local development):
-
-Copy the example environment file and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Then open `.env` and replace the placeholder values with your actual API keys. The project will automatically load this file on startup — no need to manually export environment variables each session.
-
-### 3. Running the Tool
-
-The primary way to use the tool is via the `main.py` script.
-
-**General Command Structure:**
-
-```bash
-python main.py --query "Go to Google and type 'Hello World' into the search bar"
-```
-
-**Available Environments:**
-
-You can specify a particular environment with the ```--env <environment>``` flag.  Available options:
-
-- `playwright`: Runs the browser locally using Playwright.
-- `browserbase`: Connects to a Browserbase instance.
-
-**Local Playwright**
-
-Runs the agent using a Chrome browser instance controlled locally by Playwright.
-
-```bash
-python main.py --query="Go to Google and type 'Hello World' into the search bar" --env="playwright"
-```
-
-You can also specify an initial URL for the Playwright environment:
-
-```bash
-python main.py --query="Go to Google and type 'Hello World' into the search bar" --env="playwright" --initial_url="https://www.google.com/search?q=latest+AI+news"
-```
-
-**Browserbase**
-
-Runs the agent using Browserbase as the browser backend. Ensure the proper Browserbase environment variables are set:`BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID`.
-
-```bash
-python main.py --query="Go to Google and type 'Hello World' into the search bar" --env="browserbase"
-```
-
-**Available Models:**
-
-You can choose the model to use by specifying the ```--model <model name>``` flag. Available options on Gemini Developer API and Vertex AI Client:
-
-- `gemini-3.6-flash`: This is the default model.
-- `gemini-3.5-flash-lite`: A low-latency, cost-efficient model with computer use support.
-- `gemini-3.5-flash`: An earlier Gemini 3.5 Flash model with computer use support.
-- `gemini-2.5-computer-use-preview-10-2025`: An earlier computer use preview model.
-- `gemini-3-flash-preview`: The preview version of Gemini 3 Flash.
-
-## Agent CLI
-
-The `main.py` script is the command-line interface (CLI) for running the browser agent.
-
-### Command-Line Arguments
-
-| Argument | Description | Required | Default | Supported Environment(s) |
-|-|-|-|-|-|
-| `--query` | The natural language query for the browser agent to execute. | Yes | N/A | All |
-| `--env` | The computer use environment to use. Must be one of the following: `playwright`, or `browserbase` | No | N/A | All |
-| `--initial_url` | The initial URL to load when the browser starts. | No | https://www.google.com | All |
-| `--highlight_mouse` | If specified, the agent will attempt to highlight the mouse cursor's position in the screenshots. This is useful for visual debugging. | No | False (not highlighted) | `playwright` |
-| `--model` | The model to use. See the "Available Models" section for more information. | No | `gemini-3.6-flash` | All |
-
-### Environment Variables
-
-| Variable | Description | Required |
+| Browser | `--env` | Keys in `.env` |
 |-|-|-|
-| GEMINI_API_KEY | Your API key for the Gemini model. | Yes |
-| BROWSERBASE_API_KEY | Your API key for Browserbase. | Yes (when using the browserbase environment) |
-| BROWSERBASE_PROJECT_ID | Your Project ID for Browserbase. | Yes (when using the browserbase environment) |
+| A. Fresh local Chromium | `playwright` (default) | `GEMINI_API_KEY` |
+| B. Your everyday Chrome | `cdp` | `GEMINI_API_KEY` |
+| C. Browserbase (cloud) | `browserbase` | `GEMINI_API_KEY`, `BROWSERBASE_API_KEY` |
+| D. Browser Use (cloud) | `browser-use` | `GEMINI_API_KEY`, `BROWSER_USE_API_KEY` |
 
-## Known Issues
+Where to get the cloud keys:
+[Browserbase](https://www.browserbase.com/sessions) (shown at the top of the dashboard) ·
+[Browser Use](https://cloud.browser-use.com/settings?tab=api-keys) (Settings → API keys).
 
-### Playwright Dropdown Menu
+## 4. Run
 
-On certain operating systems, the Playwright browser is unable to capture `<select>` elements because they are rendered by the operating system. As a result, the agent is unable to send the correct screenshot to the model.
+### A. Fresh local Chromium
 
-There are several ways to mitigate this.
-
-1. Use the Browserbase option instead of Playwright.
-2. Inject a script like [proxy-select](https://github.com/amitamb/proxy-select) to render a custom `<select>` element. You must inject `proxy-select.css` and `proxy-select.js` into each page that has a non-custom `<select>` element. You can do this in the [`Playwright.__enter__`](https://github.com/google-gemini/computer-use-preview/blob/main/computers/playwright/playwright.py#L100) method by adding a few lines of code, like the following (replacing `PROXY_SELECT_JS` and `PROXY_SELECT_CSS` with the appropriate variables):
-
-```python
-self._page.add_init_script(PROXY_SELECT_JS)
-def inject_style(page):
-    try:
-        page.add_style_tag(content=PROXY_SELECT_CSS)
-    except Exception as e:
-        print(f"Error injecting style: {e}")
-
-self._page.on('domcontentloaded', inject_style)
+```bash
+python main.py --query "Search Google for the weather in Paris"
 ```
 
-Note, option 2 does not work 100% of the time, but is a temporary workaround for certain websites. The better option is to use Browserbase.
+A Chromium window opens and you can watch it work. Add `--headless` to hide it.
+
+### B. Your everyday Chrome
+
+Uses the Chrome you already have open, with your bookmarks and signed-in
+accounts (Chrome 144+).
+
+1. In Chrome, open `chrome://inspect/#remote-debugging` and check
+   **Allow remote debugging for this browser instance**.
+2. Run:
+   ```bash
+   python main.py --env cdp --query "Search Google for the weather in Paris"
+   ```
+3. Click **Allow** when Chrome asks.
+
+The agent works in its own new tab and leaves your other tabs alone.
+**It acts as you on every site you're signed in to** -- keep an eye on it and
+consider `--allowed_domains`. Using Edge: add `--cdp_url msedge`.
+[More details and troubleshooting](docs/browsers.md#your-everyday-chrome---env-cdp).
+
+### C. Browserbase
+
+```bash
+python main.py --env browserbase --query "Search Google for the weather in Paris"
+```
+
+A live-view link is printed so you can watch; the session is closed at the end.
+
+### D. Browser Use
+
+```bash
+python main.py --env browser-use --query "Search Google for the weather in Paris"
+```
+
+A live-view link is printed; the cloud browser is stopped at the end.
+
+### Long or multi-line tasks
+
+Leave out `--query` and paste the task when asked. Newlines, numbered lists
+and quotes are kept exactly as written. When done, press Enter, then
+**Ctrl+D** (macOS / Linux) or **Ctrl+Z and Enter** (Windows):
+
+```bash
+python main.py --env cdp
+```
+
+Or keep the task in a text file:
+
+```bash
+python main.py --env cdp --query_file task.txt
+```
+
+## Run with Docker
+
+A sandbox with the browser included, plus a live view at http://localhost:6080.
+Works for options A, C and D (B needs Chrome on your own computer).
+
+```bash
+cp .env.example .env               # add your keys
+docker compose build
+docker compose run --rm --service-ports agent --query "Search Google for the weather in Paris"
+```
+
+Add `--env browserbase` or `--env browser-use` for the cloud browsers. More in
+[docs/docker.md](docs/docker.md).
+
+## Useful options
+
+| Option | What it does |
+|-|-|
+| `--model gemini-4-argon` | Use the most capable model (default: `gemini-3.8-flash`) |
+| `--initial_url https://...` | Start on a specific page |
+| `--headless` | Hide the local browser window |
+| `--max_steps 50` | Stop after 50 steps (default 100) |
+| `--allowed_domains example.com` | Only let the agent visit these sites |
+| `--hitl` | Let the agent ask you for input, e.g. a 2FA code |
+| `--no-log` | Don't save this session |
+
+Every run is saved as a session in `runs/` (steps, tool calls, timing, tokens,
+screenshots). When a run ends, completed or not, it prints a link to the
+session's report: a page with the answer or error, every step and its
+screenshot. List sessions with `python runs.py`. More in
+[docs/features.md](docs/features.md#session-logs).
+
+To skip typing `--env` every time, set `COMPUTER_USE_ENV` in `.env`. All
+options: `python main.py --help` or [docs/configuration.md](docs/configuration.md).
+
+> [!CAUTION]
+> Computer Use can make mistakes. Watch it on important tasks and avoid
+> sensitive ones. Before anything consequential (purchases, sending messages,
+> accepting terms) the agent asks you to confirm in the terminal. See
+> [Google's safety guidance](https://aistudio.google.com/docs/computer-use#safety-best-practices).
+
+## Learn more
+
+* [Browsers](docs/browsers.md) -- every option for the four browsers above, a
+  dedicated agent profile, other CDP browsers, the Linux desktop environment
+* [Configuration](docs/configuration.md) -- all settings, models, Google Cloud
+  (Vertex AI) setup, exit codes
+* [Docker](docs/docker.md) -- live view, long-running desktop, settings
+* [Features](docs/features.md) -- safety controls, human in the loop, custom
+  functions, run logs, Python API
+* [Development](docs/development.md) -- design, project layout, tests, changes
+  from Google's preview repo
